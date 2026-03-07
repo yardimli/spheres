@@ -14,7 +14,7 @@ import {
 } from "@babylonjs/core";
 
 export class SphereManager {
-	constructor(scene, shadowGenerator) {
+	constructor (scene, shadowGenerator) {
 		this.scene = scene;
 		this.shadowGenerator = shadowGenerator;
 		this.spheres = [];
@@ -22,7 +22,7 @@ export class SphereManager {
 		this.onSelectionChange = null; // Callback for UI
 	}
 
-	createSphere(radius = 2, subdivisions = 1) {
+	createSphere (radius = 2, subdivisions = 1) {
 		// Create Mesh (Icosphere creates nice uniform triangles)
 		const sphere = MeshBuilder.CreateIcoSphere("sphere", {
 			radius: radius,
@@ -78,7 +78,7 @@ export class SphereManager {
 		this.selectSphere(sphere);
 	}
 
-	_addPhysics(mesh) {
+	_addPhysics (mesh) {
 		// Remove existing aggregate if updating
 		if (mesh.physicsBody) {
 			mesh.physicsBody.dispose();
@@ -94,60 +94,105 @@ export class SphereManager {
 		);
 	}
 
-	_addDragBehavior(mesh) {
+	_addDragBehavior (mesh) {
+		// Create pointer drag behavior on X, Z plane
 		const dragBehavior = new PointerDragBehavior({ dragPlaneNormal: new Vector3(0, 1, 0) });
 
-		// FIX 1: Prevent the drag plane from rotating with the sphere.
-		// This keeps the drag restricted to the world X/Z plane regardless of how the sphere rolls.
+		// Disable automatic mesh movement. We will control movement via Physics velocity.
+		dragBehavior.moveAttached = false;
+
+		// Disable orientation use to keep drag plane consistent
 		dragBehavior.useObjectOrientationForDragging = false;
 
-		// Store target Y to lock movement to X,Z plane
-		let targetY = 0;
+		let isDragging = false;
+		const targetPosition = new Vector3();
+		const liftHeight = 0.5; // How high to lift the sphere while dragging
 
-		dragBehavior.onDragStartObservable.add(() => {
+		// Logic to apply velocity towards target
+		// This runs every frame to smoothly guide the sphere to the cursor
+		const renderObserver = this.scene.onBeforeRenderObservable.add(() => {
+			if (!isDragging || !mesh.physicsBody) return;
+
+			const currentPos = mesh.absolutePosition;
+
+			// Calculate vector from current position to target (cursor) position
+			const direction = targetPosition.subtract(currentPos);
+			const distance = direction.length();
+
+			// Deadzone: If very close, stop moving to prevent jitter
+			if (distance < 0.1) {
+				mesh.physicsBody.setLinearVelocity(Vector3.Zero());
+				// Dampen angular velocity so it doesn't roll forever in place
+				const currentAng = mesh.physicsBody.getAngularVelocity();
+				mesh.physicsBody.setAngularVelocity(currentAng.scale(0.9));
+				return;
+			}
+
+			// Calculate Desired Velocity
+			// We use a proportional control: Velocity = Distance * SpeedFactor
+			// This naturally slows down as it approaches the target,
+			// and reverses direction if it overshoots.
+			const speedFactor = 15; // Adjust this for "stiffness" of the drag
+			const desiredVelocity = direction.scale(speedFactor);
+
+			// Optional: Clamp max speed to prevent physics instability on fast mouse movements
+			const maxSpeed = 50;
+			if (desiredVelocity.length() > maxSpeed) {
+				desiredVelocity.normalize().scaleInPlace(maxSpeed);
+			}
+
+			// Apply the velocity to the physics body
+			mesh.physicsBody.setLinearVelocity(desiredVelocity);
+
+			// Apply heavy angular damping while dragging
+			// This prevents the ball from spinning wildly while being carried,
+			// giving it a feeling of being "held"
+			const currentAngVel = mesh.physicsBody.getAngularVelocity();
+			mesh.physicsBody.setAngularVelocity(currentAngVel.scale(0.1));
+		});
+
+		dragBehavior.onDragStartObservable.add((event) => {
 			this.selectSphere(mesh);
 
 			if (mesh.physicsBody) {
-				// Switch to ANIMATED (Kinematic) so we can control position directly without gravity interference
-				mesh.physicsBody.setMotionType(PhysicsMotionType.ANIMATED);
+				isDragging = true;
 
-				// Lift slightly to avoid dragging through ground
-				// Ensure at least 0.5 units of clearance above ground
-				mesh.position.y = Math.max(mesh.position.y, mesh.metadata.radius + 0.5);
+				// Ensure physics is DYNAMIC (it should be already, but just in case)
+				// We do NOT switch to Kinematic/Animated because we want to use Velocity
+				mesh.physicsBody.setMotionType(PhysicsMotionType.DYNAMIC);
 
-				// Lock the Y position for the duration of the drag
-				targetY = mesh.position.y;
-
-				// Ensure quaternion is initialized for physics sync
-				if (!mesh.rotationQuaternion) {
-					mesh.rotationQuaternion = Quaternion.RotationYawPitchRoll(mesh.rotation.y, mesh.rotation.x, mesh.rotation.z);
-				}
-
-				// Sync physics immediately to new lifted position
-				mesh.physicsBody.setTargetTransform(mesh.absolutePosition, mesh.rotationQuaternion);
+				// Initialize target position from the click point
+				// Lift Y position so it doesn't scrape the ground
+				targetPosition.copyFrom(event.dragPlanePoint);
+				targetPosition.y = mesh.metadata.radius + liftHeight;
 			}
 		});
 
-		dragBehavior.onDragObservable.add(() => {
-			if (mesh.physicsBody) {
-				// FIX 2: Force Y position BEFORE syncing physics to ensure we don't clip into ground
-				mesh.position.y = targetY;
+		dragBehavior.onDragObservable.add((event) => {
+			if (isDragging) {
+				// Update target X/Z to follow cursor
+				targetPosition.x = event.dragPlanePoint.x;
+				targetPosition.z = event.dragPlanePoint.z;
 
-				// Move the physics body to the mesh's visual position
-				mesh.physicsBody.setTargetTransform(mesh.absolutePosition, mesh.rotationQuaternion);
+				// Keep Y locked at the lifted height
+				targetPosition.y = mesh.metadata.radius + liftHeight;
 			}
 		});
 
 		dragBehavior.onDragEndObservable.add(() => {
 			if (mesh.physicsBody) {
-				// Restore Dynamic physics so gravity and collisions work normally again
-				mesh.physicsBody.setMotionType(PhysicsMotionType.DYNAMIC);
+				isDragging = false;
 
-				// FIX 3: Zero out velocity immediately.
-				// This stops the momentum ("fling") from the drag action.
-				mesh.physicsBody.setLinearVelocity(Vector3.Zero());
-				mesh.physicsBody.setAngularVelocity(Vector3.Zero());
+				// Optional: Reduce velocity on release so it doesn't fly off too fast
+				// if the mouse was moving quickly
+				const currentVel = mesh.physicsBody.getLinearVelocity();
+				mesh.physicsBody.setLinearVelocity(currentVel.scale(0.5));
 			}
+		});
+
+		// Clean up observer if the mesh is destroyed (e.g. resized via UI)
+		mesh.onDisposeObservable.add(() => {
+			this.scene.onBeforeRenderObservable.remove(renderObserver);
 		});
 
 		mesh.addBehavior(dragBehavior);
@@ -156,7 +201,7 @@ export class SphereManager {
 	/**
 	 * Applies a random velocity to the currently selected sphere.
 	 */
-	applyRandomVelocity() {
+	applyRandomVelocity () {
 		if (!this.selectedSphere || !this.selectedSphere.physicsBody) return;
 
 		// Ensure it is dynamic before applying impulse
@@ -177,7 +222,7 @@ export class SphereManager {
 		this.selectedSphere.physicsBody.applyImpulse(impulse, this.selectedSphere.getAbsolutePosition());
 	}
 
-	selectSphere(sphere) {
+	selectSphere (sphere) {
 		if (this.selectedSphere === sphere) return;
 
 		// Reset previous highlight
@@ -199,7 +244,7 @@ export class SphereManager {
 		}
 	}
 
-	updateSelectedSphere(radius, subdivisions) {
+	updateSelectedSphere (radius, subdivisions) {
 		if (!this.selectedSphere) return;
 
 		const sphere = this.selectedSphere;
