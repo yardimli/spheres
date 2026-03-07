@@ -10,7 +10,8 @@ import {
 	Scalar,
 	ActionManager,
 	ExecuteCodeAction,
-	Quaternion
+	Quaternion,
+	VertexBuffer // Added import
 } from "@babylonjs/core";
 
 export class SphereManager {
@@ -47,7 +48,8 @@ export class SphereManager {
 		// Store sphere properties for UI reference
 		sphere.metadata = {
 			radius: radius,
-			subdivisions: subdivisions
+			subdivisions: subdivisions,
+			mutations: [] // Store list of vertex deformations
 		};
 
 		// Initialize Physics
@@ -84,11 +86,17 @@ export class SphereManager {
 			mesh.physicsBody.dispose();
 		}
 
+		// Determine shape based on mutations.
+		// If mutated, the geometry is no longer a perfect sphere, so we use Convex Hull.
+		// Note: Convex Hull is more expensive than Sphere, but necessary for accurate collisions on deformed meshes.
+		const hasMutations = mesh.metadata.mutations && mesh.metadata.mutations.length > 0;
+		const shapeType = hasMutations ? PhysicsShapeType.CONVEX_HULL : PhysicsShapeType.SPHERE;
+
 		// Create Physics Aggregate
 		// Friction 0.5, Restitution 0.7 (bouncy)
 		new PhysicsAggregate(
 			mesh,
-			PhysicsShapeType.SPHERE,
+			shapeType,
 			{ mass: 1, friction: 0.5, restitution: 0.7 },
 			this.scene
 		);
@@ -222,6 +230,122 @@ export class SphereManager {
 		this.selectedSphere.physicsBody.applyImpulse(impulse, this.selectedSphere.getAbsolutePosition());
 	}
 
+	/**
+	 * Deforms the selected sphere by moving a random vertex outward.
+	 */
+	mutateSelectedSphere () {
+		if (!this.selectedSphere) return;
+
+		const mesh = this.selectedSphere;
+		const positions = mesh.getVerticesData(VertexBuffer.PositionKind);
+		if (!positions) return;
+
+		// 1. Pick a random vertex index (stride is 3)
+		const vertexCount = positions.length / 3;
+		const randomIndex = Math.floor(Math.random() * vertexCount);
+		const i = randomIndex * 3;
+
+		// 2. Calculate local position and normal direction
+		const currentPos = new Vector3(positions[i], positions[i + 1], positions[i + 2]);
+		const direction = currentPos.normalizeToNew(); // Assuming center is 0,0,0
+
+		// 3. Create a deformation vector
+		const deformationAmount = Scalar.RandomRange(0.5, 1.5);
+		const offset = direction.scale(deformationAmount);
+
+		// 4. Store mutation for persistence across recreations.
+		// We store the direction vector to find the "same" point later if resolution changes.
+		mesh.metadata.mutations.push({
+			targetDirection: direction,
+			offset: offset
+		});
+
+		// 5. Apply to current geometry
+		// Since we use flat shading, multiple vertices might occupy the same point.
+		// To make it look solid, we move all vertices that are at this location.
+		for (let v = 0; v < vertexCount; v++) {
+			const vIdx = v * 3;
+			// Check if this vertex is at the same location as the picked one
+			if (
+				Scalar.WithinEpsilon(positions[vIdx], currentPos.x, 0.001) &&
+				Scalar.WithinEpsilon(positions[vIdx + 1], currentPos.y, 0.001) &&
+				Scalar.WithinEpsilon(positions[vIdx + 2], currentPos.z, 0.001)
+			) {
+				positions[vIdx] += offset.x;
+				positions[vIdx + 1] += offset.y;
+				positions[vIdx + 2] += offset.z;
+			}
+		}
+
+		// 6. Update Mesh
+		mesh.setVerticesData(VertexBuffer.PositionKind, positions);
+		mesh.createNormals(true); // Re-calculate normals for lighting
+
+		// 7. Re-initialize Physics (Must switch to Convex Hull to match new shape)
+		this._addPhysics(mesh);
+	}
+
+	/**
+	 * Applies stored mutations to a newly created mesh.
+	 * This ensures deformations persist when changing radius or subdivisions.
+	 */
+	_applyStoredMutations (mesh) {
+		if (!mesh.metadata.mutations || mesh.metadata.mutations.length === 0) return;
+
+		const positions = mesh.getVerticesData(VertexBuffer.PositionKind);
+		const vertexCount = positions.length / 3;
+
+		// For each stored mutation
+		mesh.metadata.mutations.forEach(mutation => {
+			// Find the vertex on the new mesh that is closest to the mutation direction
+			let closestIndex = -1;
+			let maxDot = -1.0;
+
+			// Search for closest vertex by checking dot product of directions
+			for (let v = 0; v < vertexCount; v++) {
+				const vIdx = v * 3;
+				// Simple normalized check
+				const vx = positions[vIdx];
+				const vy = positions[vIdx + 1];
+				const vz = positions[vIdx + 2];
+				const len = Math.sqrt(vx * vx + vy * vy + vz * vz);
+
+				// Dot product
+				const dot = (vx / len) * mutation.targetDirection.x +
+					(vy / len) * mutation.targetDirection.y +
+					(vz / len) * mutation.targetDirection.z;
+
+				if (dot > maxDot) {
+					maxDot = dot;
+					closestIndex = vIdx;
+				}
+			}
+
+			// Apply the offset to the closest vertex (and coincident ones for watertightness)
+			if (closestIndex !== -1 && maxDot > 0.9) { // Threshold to ensure we are reasonably close
+				const targetX = positions[closestIndex];
+				const targetY = positions[closestIndex + 1];
+				const targetZ = positions[closestIndex + 2];
+
+				for (let v = 0; v < vertexCount; v++) {
+					const vIdx = v * 3;
+					if (
+						Scalar.WithinEpsilon(positions[vIdx], targetX, 0.001) &&
+						Scalar.WithinEpsilon(positions[vIdx + 1], targetY, 0.001) &&
+						Scalar.WithinEpsilon(positions[vIdx + 2], targetZ, 0.001)
+					) {
+						positions[vIdx] += mutation.offset.x;
+						positions[vIdx + 1] += mutation.offset.y;
+						positions[vIdx + 2] += mutation.offset.z;
+					}
+				}
+			}
+		});
+
+		mesh.setVerticesData(VertexBuffer.PositionKind, positions);
+		mesh.createNormals(true);
+	}
+
 	selectSphere (sphere) {
 		if (this.selectedSphere === sphere) return;
 
@@ -252,8 +376,8 @@ export class SphereManager {
 		// Check if values actually changed
 		if (sphere.metadata.radius === radius && sphere.metadata.subdivisions === subdivisions) return;
 
-		sphere.metadata.radius = radius;
-		sphere.metadata.subdivisions = subdivisions;
+		// Persist existing mutations
+		const existingMutations = sphere.metadata.mutations || [];
 
 		const pos = sphere.position.clone();
 		// Handle rotation correctly (Physics uses Quaternions)
@@ -277,7 +401,14 @@ export class SphereManager {
 			newSphere.rotation = rot;
 		}
 		newSphere.material = material;
-		newSphere.metadata = { radius, subdivisions };
+		newSphere.metadata = {
+			radius,
+			subdivisions,
+			mutations: existingMutations
+		};
+
+		// Re-apply mutations to the new geometry
+		this._applyStoredMutations(newSphere);
 
 		// Re-add behaviors and physics
 		this.shadowGenerator.addShadowCaster(newSphere);

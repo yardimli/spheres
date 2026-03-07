@@ -1,6 +1,6 @@
 import { Engine, Scene, Vector3, HavokPlugin, ArcRotateCamera } from "@babylonjs/core";
 import HavokPhysics from "@babylonjs/havok";
-import { buildEnvironment } from "./sceneBuilder";
+import { EnvironmentManager } from "./sceneBuilder";
 import { SphereManager } from "./sphereManager";
 import { createUI } from "./uiManager";
 
@@ -21,11 +21,14 @@ async function initApp() {
 	camera.attachControl(canvas, true);
 
 	// Build Environment
-	const shadowGenerator = buildEnvironment(scene);
+	const environmentManager = new EnvironmentManager(scene);
+	const shadowGenerator = environmentManager.build();
 
 	// Managers
 	const sphereManager = new SphereManager(scene, shadowGenerator);
-	createUI(sphereManager);
+
+	// Pass environmentManager to UI so we can control ground size
+	createUI(sphereManager, environmentManager);
 
 	// Initial Sphere
 	sphereManager.createSphere(2, 2);
