@@ -1,0 +1,31 @@
+{
+  "name": "spheres",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/yardimli/spheres.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "bugs": {
+    "url": "https://github.com/yardimli/spheres/issues"
+  },
+  "homepage": "https://github.com/yardimli/spheres#readme",
+  "dependencies": {
+    "@babylonjs/core": "^8.54.1",
+    "@babylonjs/gui": "^8.54.1",
+    "@babylonjs/havok": "^1.3.11"
+  },
+  "devDependencies": {
+    "vite": "^7.3.1"
+  }
+}
