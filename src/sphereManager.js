@@ -97,50 +97,84 @@ export class SphereManager {
 	_addDragBehavior(mesh) {
 		const dragBehavior = new PointerDragBehavior({ dragPlaneNormal: new Vector3(0, 1, 0) });
 
-		let lastPosition = new Vector3();
-		let currentVelocity = new Vector3();
-		let lastTime = 0;
+		// FIX 1: Prevent the drag plane from rotating with the sphere.
+		// This keeps the drag restricted to the world X/Z plane regardless of how the sphere rolls.
+		dragBehavior.useObjectOrientationForDragging = false;
+
+		// Store target Y to lock movement to X,Z plane
+		let targetY = 0;
 
 		dragBehavior.onDragStartObservable.add(() => {
 			this.selectSphere(mesh);
-			// Switch to Kinematic (Animated) so user controls position, physics is suspended
+
 			if (mesh.physicsBody) {
+				// Switch to ANIMATED (Kinematic) so we can control position directly without gravity interference
 				mesh.physicsBody.setMotionType(PhysicsMotionType.ANIMATED);
+
 				// Lift slightly to avoid dragging through ground
+				// Ensure at least 0.5 units of clearance above ground
 				mesh.position.y = Math.max(mesh.position.y, mesh.metadata.radius + 0.5);
+
+				// Lock the Y position for the duration of the drag
+				targetY = mesh.position.y;
+
+				// Ensure quaternion is initialized for physics sync
+				if (!mesh.rotationQuaternion) {
+					mesh.rotationQuaternion = Quaternion.RotationYawPitchRoll(mesh.rotation.y, mesh.rotation.x, mesh.rotation.z);
+				}
+
+				// Sync physics immediately to new lifted position
+				mesh.physicsBody.setTargetTransform(mesh.absolutePosition, mesh.rotationQuaternion);
 			}
-			lastPosition.copyFrom(mesh.position);
-			lastTime = performance.now();
 		});
 
 		dragBehavior.onDragObservable.add(() => {
-			const now = performance.now();
-			const dt = (now - lastTime) / 1000;
-			if (dt > 0) {
-				// Calculate velocity for "throw" effect
-				const moveDelta = mesh.position.subtract(lastPosition);
-				currentVelocity = moveDelta.scale(1 / dt);
+			if (mesh.physicsBody) {
+				// FIX 2: Force Y position BEFORE syncing physics to ensure we don't clip into ground
+				mesh.position.y = targetY;
 
-				lastPosition.copyFrom(mesh.position);
-				lastTime = now;
+				// Move the physics body to the mesh's visual position
+				mesh.physicsBody.setTargetTransform(mesh.absolutePosition, mesh.rotationQuaternion);
 			}
 		});
 
 		dragBehavior.onDragEndObservable.add(() => {
 			if (mesh.physicsBody) {
-				// Restore Dynamic physics
+				// Restore Dynamic physics so gravity and collisions work normally again
 				mesh.physicsBody.setMotionType(PhysicsMotionType.DYNAMIC);
 
-				// Apply the calculated throw velocity
-				// FIX: Use getMassProperties().mass instead of getMass()
-				const mass = mesh.physicsBody.getMassProperties().mass;
-				const impulse = currentVelocity.scale(mass);
-
-				mesh.physicsBody.applyImpulse(impulse, mesh.getAbsolutePosition());
+				// FIX 3: Zero out velocity immediately.
+				// This stops the momentum ("fling") from the drag action.
+				mesh.physicsBody.setLinearVelocity(Vector3.Zero());
+				mesh.physicsBody.setAngularVelocity(Vector3.Zero());
 			}
 		});
 
 		mesh.addBehavior(dragBehavior);
+	}
+
+	/**
+	 * Applies a random velocity to the currently selected sphere.
+	 */
+	applyRandomVelocity() {
+		if (!this.selectedSphere || !this.selectedSphere.physicsBody) return;
+
+		// Ensure it is dynamic before applying impulse
+		this.selectedSphere.physicsBody.setMotionType(PhysicsMotionType.DYNAMIC);
+
+		// Create a random direction vector
+		const x = Scalar.RandomRange(-1, 1);
+		const z = Scalar.RandomRange(-1, 1);
+		const y = Scalar.RandomRange(0.2, 1); // Biased upwards for a "jump" effect
+
+		const direction = new Vector3(x, y, z).normalize();
+		const magnitude = 15; // Force strength
+
+		// Apply impulse (Mass * Velocity change)
+		const impulse = direction.scale(magnitude);
+
+		// Apply to the center of mass
+		this.selectedSphere.physicsBody.applyImpulse(impulse, this.selectedSphere.getAbsolutePosition());
 	}
 
 	selectSphere(sphere) {

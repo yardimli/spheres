@@ -77,6 +77,23 @@ export function createUI(sphereManager) {
 	});
 	panel.addControl(button);
 
+	// Spacer
+	const spacer2 = new TextBlock();
+	spacer2.height = "10px";
+	panel.addControl(spacer2);
+
+	// Random Kick Button
+	const kickButton = Button.CreateSimpleButton("but2", "Kick Selected");
+	kickButton.width = "200px";
+	kickButton.height = "40px";
+	kickButton.color = "white";
+	kickButton.cornerRadius = 20;
+	kickButton.background = "#DDAA00"; // Gold/Dark Yellow
+	kickButton.onPointerUpObservable.add(() => {
+		sphereManager.applyRandomVelocity();
+	});
+	panel.addControl(kickButton);
+
 	// Update Sliders when Selection Changes
 	sphereManager.onSelectionChange = (data) => {
 		radiusControls.slider.value = data.radius;
