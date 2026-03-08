@@ -1,6 +1,6 @@
 import { AdvancedDynamicTexture, StackPanel, Slider, TextBlock, Button, Control } from "@babylonjs/gui";
 
-export function createUI(sphereManager, environmentManager) {
+export function createUI(sphereManager, environmentManager, rodManager) {
 	const advancedTexture = AdvancedDynamicTexture.CreateFullscreenUI("UI");
 
 	const panel = new StackPanel();
@@ -31,7 +31,7 @@ export function createUI(sphereManager, environmentManager) {
 			// Snap to integer if subdivisions
 			if(text === "Subdivisions") value = Math.round(value);
 			// Round size for clean display
-			if(text.includes("Room") || text === "Size") value = Math.round(value * 10) / 10;
+			if(text.includes("Room") || text === "Size" || text === "Rod Length") value = Math.round(value * 10) / 10;
 
 			header.text = text + ": " + value;
 			onChange(value);
@@ -66,6 +66,30 @@ export function createUI(sphereManager, environmentManager) {
 	const spacer = new TextBlock();
 	spacer.height = "20px";
 	panel.addControl(spacer);
+
+	// --- Rod Controls ---
+
+	// Rod Length Slider
+	addSlider("Rod Length", 2, 20, 10, (value) => {
+		rodManager.setRodLength(value);
+	});
+
+	// Unlink Button
+	const unlinkButton = Button.CreateSimpleButton("unlinkBtn", "Unlink Rod");
+	unlinkButton.width = "200px";
+	unlinkButton.height = "40px";
+	unlinkButton.color = "white";
+	unlinkButton.cornerRadius = 20;
+	unlinkButton.background = "#CC3333"; // Red
+	unlinkButton.onPointerUpObservable.add(() => {
+		rodManager.unlinkSelected();
+	});
+	panel.addControl(unlinkButton);
+
+	// Spacer
+	const spacerRod = new TextBlock();
+	spacerRod.height = "20px";
+	panel.addControl(spacerRod);
 
 	// --- Environment Controls ---
 

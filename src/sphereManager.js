@@ -43,6 +43,9 @@ export class SphereManager {
 		mat.alpha = 0.4; // Transparency
 		sphere.material = mat;
 
+		// Make sphere invisible to mouse pick so we can click the core
+		sphere.isPickable = false;
+
 		// Create Core Mesh (Tetrahedron / Triangle Core)
 		// Size is relative to sphere radius
 		const core = MeshBuilder.CreatePolyhedron("core", {
@@ -60,6 +63,9 @@ export class SphereManager {
 		// Parent core to sphere so it moves with it
 		core.parent = sphere;
 
+		// Core is the interaction handle
+		core.isPickable = true;
+
 		// Shadow
 		this.shadowGenerator.addShadowCaster(sphere);
 		this.shadowGenerator.addShadowCaster(core);
@@ -75,12 +81,12 @@ export class SphereManager {
 		// Initialize Physics
 		this._addPhysics(sphere);
 
-		// Add Drag Behavior
-		this._addDragBehavior(sphere);
+		// Add Drag Behavior (Attach to core, but control sphere)
+		this._addDragBehavior(core);
 
-		// Add Selection Trigger
-		sphere.actionManager = new ActionManager(this.scene);
-		sphere.actionManager.registerAction(
+		// Add Selection Trigger (Attach to core)
+		core.actionManager = new ActionManager(this.scene);
+		core.actionManager.registerAction(
 			new ExecuteCodeAction(
 				ActionManager.OnPickTrigger,
 				() => {
@@ -116,6 +122,9 @@ export class SphereManager {
 	}
 
 	_addDragBehavior (mesh) {
+		// mesh is the core (child), but we want to move the sphere (parent)
+		const rootMesh = mesh.parent || mesh;
+
 		// Create pointer drag behavior.
 		// We do NOT set dragPlaneNormal here initially. We set it on drag start to face camera.
 		const dragBehavior = new PointerDragBehavior();
@@ -129,16 +138,16 @@ export class SphereManager {
 
 		// Logic to apply velocity towards target
 		const renderObserver = this.scene.onBeforeRenderObservable.add(() => {
-			if (!isDragging || !mesh.physicsBody) return;
+			if (!isDragging || !rootMesh.physicsBody) return;
 
-			const currentPos = mesh.absolutePosition;
+			const currentPos = rootMesh.absolutePosition;
 			const direction = targetPosition.subtract(currentPos);
 			const distance = direction.length();
 
 			if (distance < 0.1) {
-				mesh.physicsBody.setLinearVelocity(Vector3.Zero());
-				const currentAng = mesh.physicsBody.getAngularVelocity();
-				mesh.physicsBody.setAngularVelocity(currentAng.scale(0.9));
+				rootMesh.physicsBody.setLinearVelocity(Vector3.Zero());
+				const currentAng = rootMesh.physicsBody.getAngularVelocity();
+				rootMesh.physicsBody.setAngularVelocity(currentAng.scale(0.9));
 				return;
 			}
 
@@ -150,18 +159,18 @@ export class SphereManager {
 				desiredVelocity.normalize().scaleInPlace(maxSpeed);
 			}
 
-			mesh.physicsBody.setLinearVelocity(desiredVelocity);
+			rootMesh.physicsBody.setLinearVelocity(desiredVelocity);
 
-			const currentAngVel = mesh.physicsBody.getAngularVelocity();
-			mesh.physicsBody.setAngularVelocity(currentAngVel.scale(0.1));
+			const currentAngVel = rootMesh.physicsBody.getAngularVelocity();
+			rootMesh.physicsBody.setAngularVelocity(currentAngVel.scale(0.1));
 		});
 
 		dragBehavior.onDragStartObservable.add((event) => {
-			this.selectSphere(mesh);
+			this.selectSphere(rootMesh);
 
-			if (mesh.physicsBody) {
+			if (rootMesh.physicsBody) {
 				isDragging = true;
-				mesh.physicsBody.setMotionType(PhysicsMotionType.DYNAMIC);
+				rootMesh.physicsBody.setMotionType(PhysicsMotionType.DYNAMIC);
 
 				// Update drag plane to be perpendicular to camera view for intuitive 3D dragging
 				if (this.scene.activeCamera) {
@@ -183,10 +192,10 @@ export class SphereManager {
 		});
 
 		dragBehavior.onDragEndObservable.add(() => {
-			if (mesh.physicsBody) {
+			if (rootMesh.physicsBody) {
 				isDragging = false;
-				const currentVel = mesh.physicsBody.getLinearVelocity();
-				mesh.physicsBody.setLinearVelocity(currentVel.scale(0.5));
+				const currentVel = rootMesh.physicsBody.getLinearVelocity();
+				rootMesh.physicsBody.setLinearVelocity(currentVel.scale(0.5));
 			}
 		});
 
@@ -356,6 +365,7 @@ export class SphereManager {
 			newSphere.rotation = rot;
 		}
 		newSphere.material = material;
+		newSphere.isPickable = false;
 
 		// Re-create Core
 		const core = MeshBuilder.CreatePolyhedron("core", {
@@ -369,6 +379,7 @@ export class SphereManager {
 		coreMat.alpha = 1.0;
 		core.material = coreMat;
 		core.parent = newSphere;
+		core.isPickable = true;
 
 		newSphere.metadata = {
 			radius,
@@ -383,10 +394,13 @@ export class SphereManager {
 		this.shadowGenerator.addShadowCaster(core);
 
 		this._addPhysics(newSphere);
-		this._addDragBehavior(newSphere);
+		this._addDragBehavior(core);
 
-		newSphere.actionManager = new ActionManager(this.scene);
-		newSphere.actionManager.registerAction(
+		newSphere.actionManager = null;
+
+		// Add ActionManager to core
+		core.actionManager = new ActionManager(this.scene);
+		core.actionManager.registerAction(
 			new ExecuteCodeAction(
 				ActionManager.OnPickTrigger,
 				() => this.selectSphere(newSphere)

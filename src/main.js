@@ -2,6 +2,7 @@ import { Engine, Scene, Vector3, HavokPlugin, ArcRotateCamera } from "@babylonjs
 import HavokPhysics from "@babylonjs/havok";
 import { EnvironmentManager } from "./sceneBuilder";
 import { SphereManager } from "./sphereManager";
+import { RodManager } from "./rodManager"; // Import RodManager
 import { createUI } from "./uiManager";
 
 async function initApp() {
@@ -28,11 +29,15 @@ async function initApp() {
 	// Managers
 	const sphereManager = new SphereManager(scene, shadowGenerator);
 
-	// Pass environmentManager to UI so we can control room size
-	createUI(sphereManager, environmentManager);
+	// Rod Manager
+	const rodManager = new RodManager(scene, sphereManager);
+
+	// Pass environmentManager and rodManager to UI
+	createUI(sphereManager, environmentManager, rodManager);
 
 	// Initial Sphere
 	sphereManager.createSphere(2, 2);
+	sphereManager.createSphere(2, 2); // Create a second one for testing immediately
 
 	// Render Loop
 	engine.runRenderLoop(() => {
