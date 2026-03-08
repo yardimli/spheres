@@ -1,3 +1,5 @@
+// src/rodManager.js
+
 import {
 	Vector3,
 	Color3,
@@ -9,18 +11,15 @@ import {
 	PhysicsConstraintAxis,
 	PhysicsMotionType,
 	Animation,
-	ActionManager,
-	ExecuteCodeAction,
-	Scalar,
-	Mesh,
-	VertexData,
 	PointerEventTypes,
-	PhysicsAggregate, // Added
-	PhysicsShapeType  // Added
+	PhysicsAggregate,
+	PhysicsShapeType,
+	PointerDragBehavior, // Added for dragging
+	Scalar // Added for random spawning
 } from "@babylonjs/core";
 
 export class RodManager {
-	constructor(scene, sphereManager) {
+	constructor (scene, sphereManager) {
 		this.scene = scene;
 		this.sphereManager = sphereManager;
 
@@ -30,10 +29,9 @@ export class RodManager {
 		this.rodDiameter = 1;
 
 		// State
-		this.selectedFace = null; // { mesh, faceId, normal, center }
-		this.selectionMesh = null; // Selected face mesh (pulsing)
 		this.selectedRod = null;
 		this.rods =[]; // Store active rods
+		this.lastDragTime = 0; // Track rod drag end time to prevent accidental clicks
 
 		// Materials
 		this.rodMat = new StandardMaterial("rodMat", scene);
@@ -49,15 +47,16 @@ export class RodManager {
 		this._initInteraction();
 	}
 
-	_initInteraction() {
+	_initInteraction () {
 		// Use PointerObservable to handle interaction logic more granularly
-		// We use POINTERUP to distinguish between a drag release and a click
 		this.scene.onPointerObservable.add((pointerInfo) => {
 			if (pointerInfo.event.button !== 0) return; // Left click only
 
-			// Check if a drag operation just finished recently (within 200ms)
-			// If so, this "Up" event is part of the drag, not a click to select.
-			if (this.sphereManager.lastDragTime && (Date.now() - this.sphereManager.lastDragTime < 200)) {
+			// Check if a drag operation just finished recently (within 200ms) for either spheres or rods
+			const sphereDragged = this.sphereManager.lastDragTime && (Date.now() - this.sphereManager.lastDragTime < 200);
+			const rodDragged = this.lastDragTime && (Date.now() - this.lastDragTime < 200);
+
+			if (sphereDragged || rodDragged) {
 				return;
 			}
 
@@ -66,32 +65,175 @@ export class RodManager {
 			// Check if we clicked a Rod
 			if (pickInfo.hit && pickInfo.pickedMesh && pickInfo.pickedMesh.name === "connectionRod") {
 				this._selectRod(pickInfo.pickedMesh);
-				// Clear face selection when selecting a rod
-				this._clearFaceSelection();
 				return;
 			}
 
 			// Check if we clicked a Core Face
 			if (pickInfo.hit && pickInfo.pickedMesh && pickInfo.pickedMesh.name === "core") {
-				this._handleFaceClick(pickInfo);
+				// Only handle face click if a rod is currently selected
+				if (this.selectedRod) {
+					this._handleFaceClick(pickInfo);
+				}
 				return;
 			}
 
 			// Clicked elsewhere
 			this._deselectRod();
-			this._clearFaceSelection();
-
 		}, PointerEventTypes.POINTERUP);
 	}
 
-	_getFaceData(mesh, faceId) {
+	// Spawns a standalone rod into the scene
+	spawnRod () {
+		const length = this.rodLength;
+		const outerRadius = this.rodDiameter / 2;
+		const innerRadius = outerRadius - this.rodWallThickness;
+
+		// Create a hollow cylinder using a Lathe centered at the origin
+		const shape =[
+			new Vector3(innerRadius, -length / 2, 0),
+			new Vector3(outerRadius, -length / 2, 0),
+			new Vector3(outerRadius, length / 2, 0),
+			new Vector3(innerRadius, length / 2, 0),
+			new Vector3(innerRadius, -length / 2, 0)
+		];
+
+		const rod = MeshBuilder.CreateLathe("connectionRod", {
+			shape: shape,
+			radius: 1,
+			tessellation: 24,
+			sideOrientation: 2 // DOUBLESIDE
+		}, this.scene);
+
+		// Spawn at a random position inside the room bounds
+		rod.position.x = Scalar.RandomRange(-10, 10);
+		rod.position.y = Scalar.RandomRange(-10, 10);
+		rod.position.z = Scalar.RandomRange(-10, 10);
+
+		// Random initial rotation
+		rod.rotationQuaternion = Quaternion.FromEulerAngles(
+			Scalar.RandomRange(0, Math.PI * 2),
+			Scalar.RandomRange(0, Math.PI * 2),
+			Scalar.RandomRange(0, Math.PI * 2)
+		);
+
+		rod.material = this.rodMat;
+		rod.isPickable = true;
+
+		// Make the rod a physical object
+		const rodAgg = new PhysicsAggregate(
+			rod,
+			PhysicsShapeType.CONVEX_HULL,
+			{ mass: 0.5, friction: 0.5, restitution: 0.5 },
+			this.scene
+		);
+		rodAgg.body.setLinearDamping(1.0);
+		rodAgg.body.setAngularDamping(1.0);
+
+		// Initialize metadata to track attachments
+		rod.metadata = {
+			length: length,
+			attachedA: null, // Will store { sphere, constraint }
+			attachedB: null
+		};
+
+		// Add drag behavior to the new rod
+		this._addDragBehavior(rod);
+
+		this.rods.push(rod);
+		this._selectRod(rod);
+	}
+
+	// Adds pointer drag behavior to move the rod around
+	_addDragBehavior (mesh) {
+		const dragBehavior = new PointerDragBehavior();
+
+		// Disable automatic mesh movement. We control via Physics velocity.
+		dragBehavior.moveAttached = false;
+		dragBehavior.useObjectOrientationForDragging = false;
+
+		let isDragging = false;
+		let hasMoved = false;
+		const targetPosition = new Vector3();
+
+		// Logic to apply velocity towards target
+		const renderObserver = this.scene.onBeforeRenderObservable.add(() => {
+			if (!isDragging || !hasMoved || !mesh.physicsBody) return;
+
+			const currentPos = mesh.absolutePosition;
+			const direction = targetPosition.subtract(currentPos);
+			const distance = direction.length();
+
+			if (distance < 0.1) {
+				mesh.physicsBody.setLinearVelocity(Vector3.Zero());
+				const currentAng = mesh.physicsBody.getAngularVelocity();
+				mesh.physicsBody.setAngularVelocity(currentAng.scale(0.9));
+				return;
+			}
+
+			const speedFactor = 15;
+			const desiredVelocity = direction.scale(speedFactor);
+
+			const maxSpeed = 50;
+			if (desiredVelocity.length() > maxSpeed) {
+				desiredVelocity.normalize().scaleInPlace(maxSpeed);
+			}
+
+			mesh.physicsBody.setLinearVelocity(desiredVelocity);
+
+			const currentAngVel = mesh.physicsBody.getAngularVelocity();
+			mesh.physicsBody.setAngularVelocity(currentAngVel.scale(0.1));
+		});
+
+		dragBehavior.onDragStartObservable.add((event) => {
+			this._selectRod(mesh);
+
+			if (mesh.physicsBody) {
+				isDragging = true;
+				hasMoved = false; // Reset movement flag
+				mesh.physicsBody.setMotionType(PhysicsMotionType.DYNAMIC);
+
+				// Update drag plane to be perpendicular to camera view for intuitive 3D dragging
+				if (this.scene.activeCamera) {
+					const camDir = this.scene.activeCamera.getForwardRay().direction;
+					dragBehavior.options.dragPlaneNormal = camDir.scale(-1);
+				}
+
+				targetPosition.copyFrom(event.dragPlanePoint);
+			}
+		});
+
+		dragBehavior.onDragObservable.add((event) => {
+			if (isDragging) {
+				hasMoved = true;
+				targetPosition.copyFrom(event.dragPlanePoint);
+			}
+		});
+
+		dragBehavior.onDragEndObservable.add(() => {
+			if (mesh.physicsBody) {
+				isDragging = false;
+				hasMoved = false;
+				const currentVel = mesh.physicsBody.getLinearVelocity();
+				mesh.physicsBody.setLinearVelocity(currentVel.scale(0.5));
+
+				// Record timestamp to prevent conflict with click selection
+				this.lastDragTime = Date.now();
+			}
+		});
+
+		mesh.onDisposeObservable.add(() => {
+			this.scene.onBeforeRenderObservable.remove(renderObserver);
+		});
+
+		mesh.addBehavior(dragBehavior);
+	}
+
+	_getFaceData (mesh, faceId) {
 		const indices = mesh.getIndices();
 		const positions = mesh.getVerticesData("position");
 
 		if (!indices || !positions) return null;
 
-		// A face in a standard mesh usually consists of 3 indices (triangle)
-		// Note: pickInfo.faceId is the index of the face (triangle index), so we multiply by 3
 		const i1 = indices[faceId * 3];
 		const i2 = indices[faceId * 3 + 1];
 		const i3 = indices[faceId * 3 + 2];
@@ -112,11 +254,9 @@ export class RodManager {
 		// Calculate Normal
 		const edge1 = v2w.subtract(v1w);
 		const edge2 = v3w.subtract(v1w);
-		let normal = Vector3.Cross(edge1, edge2).normalize();
+		const normal = Vector3.Cross(edge1, edge2).normalize();
 
-		// FIX: Ensure normal points outward from the sphere center
-		// The core mesh's parent is the sphere, so the sphere center is the parent's position
-		// Or simply, the core's absolute position is the center (since it's centered in the sphere)
+		// Ensure normal points outward from the sphere center
 		const meshCenter = mesh.absolutePosition;
 		const dirFromCenter = center.subtract(meshCenter);
 
@@ -133,119 +273,16 @@ export class RodManager {
 		};
 	}
 
-	_handleFaceClick(pickInfo) {
+	_handleFaceClick (pickInfo) {
 		const faceData = this._getFaceData(pickInfo.pickedMesh, pickInfo.faceId);
 		if (!faceData) return;
 
-		// Case 1: Deselect if clicking the same face
-		if (this.selectedFace &&
-			this.selectedFace.mesh === faceData.mesh &&
-			this.selectedFace.faceId === faceData.faceId) {
-			this._clearFaceSelection();
-			return;
-		}
-
-		// Case 2: First selection
-		if (!this.selectedFace) {
-			this.selectedFace = faceData;
-
-			// Create Pulsing Face Mesh
-			this._createPulsingSelection(faceData);
-
-			return;
-		}
-
-		// Case 3: Second selection (different mesh)
-		if (this.selectedFace.mesh !== faceData.mesh) {
-			// Prevent connecting a sphere to itself
-			if (this.selectedFace.mesh.parent === faceData.mesh.parent) {
-				console.warn("Cannot connect a sphere to itself.");
-				this._clearFaceSelection();
-				return;
-			}
-
-			// Connect!
-			this._connectSpheres(this.selectedFace, faceData);
-			this._clearFaceSelection();
-		}
-	}
-
-	_createPulsingSelection(faceData) {
-		// We need local coordinates to parent the selection mesh to the core
-		const mesh = faceData.mesh;
-		const indices = mesh.getIndices();
-		const positions = mesh.getVerticesData("position");
-
-		const i1 = indices[faceData.faceId * 3];
-		const i2 = indices[faceData.faceId * 3 + 1];
-		const i3 = indices[faceData.faceId * 3 + 2];
-
-		const v1 = Vector3.FromArray(positions, i1 * 3);
-		const v2 = Vector3.FromArray(positions, i2 * 3);
-		const v3 = Vector3.FromArray(positions, i3 * 3);
-
-		// Create custom mesh for the face
-		const customMesh = new Mesh("selectedFace", this.scene);
-		const vertexData = new VertexData();
-		vertexData.positions = [...v1.asArray(), ...v2.asArray(), ...v3.asArray()];
-		vertexData.indices = [0, 1, 2];
-
-		// Calculate normal for this single face
-		const normal = Vector3.Cross(v2.subtract(v1), v3.subtract(v1)).normalize();
-
-		// Ensure visual normal matches logical normal (outward)
-		// We use the same logic as _getFaceData but in local space
-		// Local center is (0,0,0) for the core
-		const localCenter = v1.add(v2).add(v3).scale(1 / 3);
-		if (Vector3.Dot(normal, localCenter) < 0) {
-			// Flip winding order for visual mesh if needed, or just flip normal
-			// For rendering, we want the face to face out.
-			vertexData.indices = [0, 2, 1]; // Flip indices
-			normal.scaleInPlace(-1);
-		}
-
-		vertexData.normals =[...normal.asArray(), ...normal.asArray(), ...normal.asArray()];
-
-		vertexData.applyToMesh(customMesh);
-
-		// Parent to the core
-		customMesh.parent = mesh;
-
-		// Material
-		const mat = new StandardMaterial("pulsingMat", this.scene);
-		mat.diffuseColor = Color3.Green();
-		mat.emissiveColor = Color3.Teal();
-		mat.alpha = 0.5;
-		mat.backFaceCulling = false;
-		mat.zOffset = -2; // Ensure it renders on top of the core
-		mat.disableLighting = true;
-		customMesh.material = mat;
-		customMesh.isPickable = false;
-
-		// Animation (Pulse Alpha)
-		const anim = new Animation("pulse", "material.alpha", 60, Animation.ANIMATIONTYPE_FLOAT, Animation.ANIMATIONLOOPMODE_CYCLE);
-		const keys =[
-			{ frame: 0, value: 0.3 },
-			{ frame: 30, value: 0.8 },
-			{ frame: 60, value: 0.3 }
-		];
-		anim.setKeys(keys);
-		customMesh.animations = [anim];
-		this.scene.beginAnimation(customMesh, 0, 60, true);
-
-		this.selectionMesh = customMesh;
-	}
-
-	_clearFaceSelection() {
-		this.selectedFace = null;
-		if (this.selectionMesh) {
-			this.selectionMesh.dispose();
-			this.selectionMesh = null;
-		}
+		// Connect the selected sphere face to the currently selected rod
+		this._connectSphereToRod(faceData, this.selectedRod);
 	}
 
 	// Helper to calculate rotation quaternion from one vector to another
-	_getRotationFromTo(fromVec, toVec) {
+	_getRotationFromTo (fromVec, toVec) {
 		const axis = Vector3.Cross(fromVec, toVec);
 		const dot = Vector3.Dot(fromVec, toVec);
 
@@ -266,15 +303,13 @@ export class RodManager {
 	}
 
 	// Helper function to create a 6DoF fixed constraint aligning current orientations
-	_createFixedConstraint(meshA, meshB, anchorWorldPos) {
-		// Create inverse matrices to map our world anchor point to local space pivots
+	_createFixedConstraint (meshA, meshB, anchorWorldPos) {
 		const invMatrixA = meshA.computeWorldMatrix(true).clone().invert();
 		const invMatrixB = meshB.computeWorldMatrix(true).clone().invert();
 
 		const pivotA = Vector3.TransformCoordinates(anchorWorldPos, invMatrixA);
 		const pivotB = Vector3.TransformCoordinates(anchorWorldPos, invMatrixB);
 
-		// Map world orientation axes into the local space of each mesh
 		const rotMatrixA = new Matrix();
 		meshA.getWorldMatrix().getRotationMatrixToRef(rotMatrixA);
 		rotMatrixA.invert();
@@ -289,7 +324,6 @@ export class RodManager {
 		const perpAxisA = Vector3.TransformNormal(Vector3.Right(), rotMatrixA).normalize();
 		const perpAxisB = Vector3.TransformNormal(Vector3.Right(), rotMatrixB).normalize();
 
-		// A completely locked constraint to enforce absolute rigid connection
 		return new Physics6DoFConstraint(
 			{
 				pivotA: pivotA,
@@ -304,193 +338,147 @@ export class RodManager {
 				{ axis: PhysicsConstraintAxis.LINEAR_Z, minLimit: 0, maxLimit: 0 },
 				{ axis: PhysicsConstraintAxis.ANGULAR_X, minLimit: 0, maxLimit: 0 },
 				{ axis: PhysicsConstraintAxis.ANGULAR_Y, minLimit: 0, maxLimit: 0 },
-				{ axis: PhysicsConstraintAxis.ANGULAR_Z, minLimit: 0, maxLimit: 0 },
+				{ axis: PhysicsConstraintAxis.ANGULAR_Z, minLimit: 0, maxLimit: 0 }
 			],
 			this.scene
 		);
 	}
 
-	async _connectSpheres(faceA, faceB) {
-		const sphereA = faceA.mesh.parent;
-		const sphereB = faceB.mesh.parent;
+	// Animates and connects a sphere to a pre-existing rod
+	async _connectSphereToRod (faceData, rod) {
+		const sphere = faceData.mesh.parent;
+		if (!sphere) return;
 
-		if (!sphereA || !sphereB) return;
+		// Prevent a sphere from attaching to the same rod twice
+		if (rod.metadata.attachedA?.sphere === sphere || rod.metadata.attachedB?.sphere === sphere) {
+			console.warn("Sphere already attached to this rod.");
+			return;
+		}
 
-		// 1. Disable Physics on Both Spheres (Lock in place during sequence)
-		const bodyA = sphereA.physicsBody;
-		const bodyB = sphereB.physicsBody;
-		if (bodyA) bodyA.setMotionType(PhysicsMotionType.ANIMATED);
-		if (bodyB) bodyB.setMotionType(PhysicsMotionType.ANIMATED);
+		// Determine which end of the rod is free and closest to the sphere
+		const rodLen = rod.metadata.length;
+		const rodWorldMatrix = rod.computeWorldMatrix(true);
+
+		const posA = new Vector3(0, rodLen / 2, 0);
+		const posB = new Vector3(0, -rodLen / 2, 0);
+		const worldPosA = Vector3.TransformCoordinates(posA, rodWorldMatrix);
+		const worldPosB = Vector3.TransformCoordinates(posB, rodWorldMatrix);
+
+		const distA = Vector3.Distance(sphere.absolutePosition, worldPosA);
+		const distB = Vector3.Distance(sphere.absolutePosition, worldPosB);
+
+		const isAFree = !rod.metadata.attachedA;
+		const isBFree = !rod.metadata.attachedB;
+
+		let endName = null;
+		let endLocalPos = null;
+		let endLocalNormal = null;
+
+		if (isAFree && isBFree) {
+			// Both ends are free, pick the closest one to the sphere
+			if (distA <= distB) {
+				endName = 'A';
+			} else {
+				endName = 'B';
+			}
+		} else if (isAFree) {
+			endName = 'A';
+		} else if (isBFree) {
+			endName = 'B';
+		} else {
+			console.warn("Rod is fully occupied.");
+			return;
+		}
+
+		if (endName === 'A') {
+			endLocalPos = posA;
+			endLocalNormal = new Vector3(0, 1, 0);
+		} else {
+			endLocalPos = posB;
+			endLocalNormal = new Vector3(0, -1, 0);
+		}
+
+		// 1. Disable Physics on Both (Lock in place during sequence)
+		const bodyS = sphere.physicsBody;
+		const bodyR = rod.physicsBody;
+
+		if (bodyS) {
+			bodyS.setMotionType(PhysicsMotionType.ANIMATED);
+			bodyS.disablePreStep = false; // Ensure physics body physically follows mesh during animation
+		}
+		if (bodyR) {
+			bodyR.setMotionType(PhysicsMotionType.ANIMATED);
+			bodyR.disablePreStep = false; // Ensure physics body physically follows mesh during animation
+		}
 
 		// 2. Prepare Geometry Data
-		const posA = sphereA.absolutePosition;
-		const normalA = faceA.normal; // Normalized direction out of A
+		const endWorldPos = Vector3.TransformCoordinates(endLocalPos, rodWorldMatrix);
+		const endWorldNormal = Vector3.TransformNormal(endLocalNormal, rodWorldMatrix).normalize();
 
-		// Distance from Sphere Center to Face Center
-		const distA = Vector3.Distance(posA, faceA.center);
-		const distB = Vector3.Distance(sphereB.absolutePosition, faceB.center);
+		const faceNormal = faceData.normal;
+		const targetFaceNormal = endWorldNormal.scale(-1); // Point inward to the rod
 
-		// Total distance between sphere centers
-		const totalDistance = distA + this.rodLength + distB;
+		// Quaternion to rotate face normal to target normal
+		const alignmentQuat = this._getRotationFromTo(faceNormal, targetFaceNormal);
 
-		// Position B along the normal extending from A
-		const targetPosB = posA.add(normalA.scale(totalDistance));
+		// Target Rotation for Sphere
+		const sphereRot = sphere.rotationQuaternion || Quaternion.FromEulerVector(sphere.rotation);
+		const targetRot = alignmentQuat.multiply(sphereRot);
 
-		// Target Rotation for B
-		const worldMatrixB = sphereB.computeWorldMatrix(true);
-		const rotationMatrixB = new Matrix();
-		worldMatrixB.getRotationMatrixToRef(rotationMatrixB);
-		const rotationB = Quaternion.FromRotationMatrix(rotationMatrixB);
+		// Target Position for Sphere
+		const vSf = faceData.center.subtract(sphere.absolutePosition);
+		const vSfNew = new Vector3();
+		vSf.rotateByQuaternionToRef(alignmentQuat, vSfNew);
+		const targetPos = endWorldPos.subtract(vSfNew);
 
-		const normalB = faceB.normal;
-		const targetNormalB = normalA.scale(-1); // Point back towards A
-
-		// Quaternion to rotate NormalB to TargetNormalB
-		const alignmentQuat = this._getRotationFromTo(normalB, targetNormalB);
-
-		// Apply this rotation to the current rotation of Sphere B
-		const targetRotB = alignmentQuat.multiply(rotationB);
-
-		// --- SEQUENCE START ---
-
-		// 3. Create Rod Mesh immediately at Sphere A
-		const rodData = this._createRodMesh(faceA.center, this.rodLength, normalA, sphereA);
-		const rod = rodData.mesh;
-
-		// 4. Wait for Rod to grow fully
-		await rodData.animationPromise;
-
-		// 5. Animate Sphere B to the end of the rod
+		// 3. Animate Sphere to the rod
 		const frameRate = 60;
 		const duration = 60; // 1 second
 
 		const animPos = new Animation("animPos", "position", frameRate, Animation.ANIMATIONTYPE_VECTOR3, Animation.ANIMATIONLOOPMODE_CONSTANT);
-		const keysPos =[
-			{ frame: 0, value: sphereB.position.clone() },
-			{ frame: duration, value: targetPosB }
-		];
-		animPos.setKeys(keysPos);
+		animPos.setKeys([
+			{ frame: 0, value: sphere.position.clone() },
+			{ frame: duration, value: targetPos }
+		]);
 
 		const animRot = new Animation("animRot", "rotationQuaternion", frameRate, Animation.ANIMATIONTYPE_QUATERNION, Animation.ANIMATIONLOOPMODE_CONSTANT);
-		// Ensure sphereB has a quaternion
-		if (!sphereB.rotationQuaternion) sphereB.rotationQuaternion = Quaternion.FromEulerVector(sphereB.rotation);
+		if (!sphere.rotationQuaternion) sphere.rotationQuaternion = Quaternion.FromEulerVector(sphere.rotation);
+		animRot.setKeys([
+			{ frame: 0, value: sphere.rotationQuaternion.clone() },
+			{ frame: duration, value: targetRot }
+		]);
 
-		const keysRot =[
-			{ frame: 0, value: sphereB.rotationQuaternion.clone() },
-			{ frame: duration, value: targetRotB }
-		];
-		animRot.setKeys(keysRot);
-
-		sphereB.animations =[animPos, animRot];
+		sphere.animations =[animPos, animRot];
 
 		await new Promise((resolve) => {
-			this.scene.beginAnimation(sphereB, 0, duration, false, 1.0, resolve);
+			this.scene.beginAnimation(sphere, 0, duration, false, 1.0, resolve);
 		});
 
-		// 6. Physics Phase - The Rod Becomes a Physical Body
-		// Decouple the rod from the sphere to act as an independent physics body
-		rod.setParent(null);
-
-		// Force complete recalculation of world matrices post-animation
-		sphereA.computeWorldMatrix(true);
-		sphereB.computeWorldMatrix(true);
+		// 4. Create Physics Constraint
+		sphere.computeWorldMatrix(true);
 		rod.computeWorldMatrix(true);
 
-		// Make the rod a physical object (using Convex Hull wraps the hollow shell into a single solid unit)
-		const rodAgg = new PhysicsAggregate(
-			rod,
-			PhysicsShapeType.CONVEX_HULL,
-			{ mass: 0.5, friction: 0.5, restitution: 0.5 },
-			this.scene
-		);
-		rodAgg.body.setLinearDamping(1.0);
-		rodAgg.body.setAngularDamping(1.0);
+		const constraint = this._createFixedConstraint(sphere, rod, endWorldPos);
+		sphere.physicsBody.addConstraint(rod.physicsBody, constraint);
 
-		// Restore original motion types
-		if (bodyA) bodyA.setMotionType(PhysicsMotionType.DYNAMIC);
-		if (bodyB) bodyB.setMotionType(PhysicsMotionType.DYNAMIC);
-
-		// Set connection anchors - Start and End of rod
-		const rodBaseWorldPos = rod.absolutePosition;
-		const rodTopLocalPos = new Vector3(0, this.rodLength, 0); // Lathe mesh is built along local Y
-		const rodTopWorldPos = Vector3.TransformCoordinates(rodTopLocalPos, rod.getWorldMatrix());
-
-		// Chain the constraints: Sphere A <-Constraint-> Rod <-Constraint-> Sphere B
-		const constraintA = this._createFixedConstraint(sphereA, rod, rodBaseWorldPos);
-		const constraintB = this._createFixedConstraint(rod, sphereB, rodTopWorldPos);
-
-		sphereA.physicsBody.addConstraint(rod.physicsBody, constraintA);
-		rod.physicsBody.addConstraint(sphereB.physicsBody, constraintB);
-
-		// Store connection data bridging all three meshes
-		const connection = {
-			mesh: rod,
-			constraintA: constraintA,
-			constraintB: constraintB,
-			sphereA: sphereA,
-			sphereB: sphereB
-		};
-
-		rod.metadata = { connection: connection };
-		this.rods.push(connection);
-	}
-
-	_createRodMesh(startPoint, length, direction, parentMesh) {
-		// Create a hollow cylinder using a Lathe
-		const outerRadius = this.rodDiameter / 2;
-		const innerRadius = outerRadius - this.rodWallThickness;
-
-		const shape =[
-			new Vector3(innerRadius, 0, 0),
-			new Vector3(outerRadius, 0, 0),
-			new Vector3(outerRadius, length, 0),
-			new Vector3(innerRadius, length, 0),
-			new Vector3(innerRadius, 0, 0)
-		];
-
-		const rod = MeshBuilder.CreateLathe("connectionRod", {
-			shape: shape,
-			radius: 1,
-			tessellation: 24,
-			sideOrientation: 2 // DOUBLESIDE
-		}, this.scene);
-
-		// Position and Orient the rod
-		rod.position = startPoint;
-
-		// Default Up is (0,1,0). We want to rotate to 'direction'.
-		const up = new Vector3(0, 1, 0);
-		const quat = this._getRotationFromTo(up, direction);
-		rod.rotationQuaternion = quat;
-
-		rod.material = this.rodMat;
-		rod.isPickable = true;
-
-		// Animation: Grow from 0 length (scale Y)
-		rod.scaling.y = 0.01;
-
-		const animScale = new Animation("growRod", "scaling.y", 60, Animation.ANIMATIONTYPE_FLOAT, Animation.ANIMATIONLOOPMODE_CONSTANT);
-		const keys =[
-			{ frame: 0, value: 0.01 },
-			{ frame: 30, value: 1.0 }
-		];
-		animScale.setKeys(keys);
-		rod.animations = [animScale];
-
-		// Parent the rod to the sphere temporarily for the growth animation
-		if (parentMesh) {
-			rod.setParent(parentMesh);
+		// 5. Restore original motion types
+		if (bodyS) {
+			bodyS.setMotionType(PhysicsMotionType.DYNAMIC);
+			bodyS.disablePreStep = true; // Restore performance optimization
+		}
+		if (bodyR) {
+			bodyR.setMotionType(PhysicsMotionType.DYNAMIC);
+			bodyR.disablePreStep = true; // Restore performance optimization
 		}
 
-		// Return mesh and a promise that resolves when animation completes
-		const animationPromise = new Promise((resolve) => {
-			this.scene.beginAnimation(rod, 0, 30, false, 1.0, resolve);
-		});
-
-		return { mesh: rod, animationPromise: animationPromise };
+		// 6. Store connection data
+		rod.metadata['attached' + endName] = {
+			sphere: sphere,
+			constraint: constraint
+		};
 	}
 
-	_selectRod(mesh) {
+	_selectRod (mesh) {
 		if (this.selectedRod === mesh) return;
 
 		// Deselect previous
@@ -500,37 +488,36 @@ export class RodManager {
 		mesh.material = this.selectedRodMat;
 	}
 
-	_deselectRod() {
+	_deselectRod () {
 		if (this.selectedRod) {
 			this.selectedRod.material = this.rodMat;
 			this.selectedRod = null;
 		}
 	}
 
-	unlinkSelected() {
+	unlinkSelected () {
 		if (!this.selectedRod) return;
 
-		const connection = this.selectedRod.metadata.connection;
+		const rod = this.selectedRod;
 
 		// Dispose Constraints cleanly
-		if (connection.constraintA) connection.constraintA.dispose();
-		if (connection.constraintB) connection.constraintB.dispose();
-
-		// Fallback clean-up in case constraint object was initialized with older version
-		if (connection.constraint) connection.constraint.dispose();
+		if (rod.metadata.attachedA && rod.metadata.attachedA.constraint) {
+			rod.metadata.attachedA.constraint.dispose();
+		}
+		if (rod.metadata.attachedB && rod.metadata.attachedB.constraint) {
+			rod.metadata.attachedB.constraint.dispose();
+		}
 
 		// Dispose Physics Body cleanly
-		if (connection.mesh && connection.mesh.physicsBody) {
-			connection.mesh.physicsBody.dispose();
+		if (rod.physicsBody) {
+			rod.physicsBody.dispose();
 		}
 
 		// Remove Visual Mesh
-		if (connection.mesh) {
-			connection.mesh.dispose();
-		}
+		rod.dispose();
 
 		// Remove from list
-		const index = this.rods.indexOf(connection);
+		const index = this.rods.indexOf(rod);
 		if (index > -1) {
 			this.rods.splice(index, 1);
 		}
@@ -538,7 +525,7 @@ export class RodManager {
 		this.selectedRod = null;
 	}
 
-	setRodLength(len) {
+	setRodLength (len) {
 		this.rodLength = len;
 	}
 }

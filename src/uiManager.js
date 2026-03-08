@@ -1,6 +1,6 @@
 import { AdvancedDynamicTexture, StackPanel, Slider, TextBlock, Button, Control } from "@babylonjs/gui";
 
-export function createUI(sphereManager, environmentManager, rodManager) {
+export function createUI (sphereManager, environmentManager, rodManager) {
 	const advancedTexture = AdvancedDynamicTexture.CreateFullscreenUI("UI");
 
 	const panel = new StackPanel();
@@ -29,9 +29,9 @@ export function createUI(sphereManager, environmentManager, rodManager) {
 		slider.background = "grey";
 		slider.onValueChangedObservable.add((value) => {
 			// Snap to integer if subdivisions
-			if(text === "Subdivisions") value = Math.round(value);
+			if (text === "Subdivisions") value = Math.round(value);
 			// Round size for clean display
-			if(text.includes("Room") || text === "Size" || text === "Rod Length") value = Math.round(value * 10) / 10;
+			if (text.includes("Room") || text === "Size" || text === "Rod Length") value = Math.round(value * 10) / 10;
 
 			header.text = text + ": " + value;
 			onChange(value);
@@ -44,7 +44,7 @@ export function createUI(sphereManager, environmentManager, rodManager) {
 
 	// Radius Slider
 	const radiusControls = addSlider("Size", 0.5, 5, 2, (value) => {
-		if(sphereManager.selectedSphere) {
+		if (sphereManager.selectedSphere) {
 			sphereManager.updateSelectedSphere(
 				value,
 				sphereManager.selectedSphere.metadata.subdivisions
@@ -54,7 +54,7 @@ export function createUI(sphereManager, environmentManager, rodManager) {
 
 	// Subdivisions Slider
 	const subControls = addSlider("Subdivisions", 1, 6, 1, (value) => {
-		if(sphereManager.selectedSphere) {
+		if (sphereManager.selectedSphere) {
 			sphereManager.updateSelectedSphere(
 				sphereManager.selectedSphere.metadata.radius,
 				value
@@ -115,7 +115,7 @@ export function createUI(sphereManager, environmentManager, rodManager) {
 
 	// --- Actions ---
 
-	// Spawn Button
+	// Spawn Sphere Button
 	const button = Button.CreateSimpleButton("but1", "Spawn Sphere");
 	button.width = "200px";
 	button.height = "40px";
@@ -131,6 +131,23 @@ export function createUI(sphereManager, environmentManager, rodManager) {
 	const spacer2 = new TextBlock();
 	spacer2.height = "10px";
 	panel.addControl(spacer2);
+
+	// NEW: Spawn Rod Button
+	const spawnRodBtn = Button.CreateSimpleButton("spawnRodBtn", "Spawn Rod");
+	spawnRodBtn.width = "200px";
+	spawnRodBtn.height = "40px";
+	spawnRodBtn.color = "white";
+	spawnRodBtn.cornerRadius = 20;
+	spawnRodBtn.background = "#3388CC"; // Blue
+	spawnRodBtn.onPointerUpObservable.add(() => {
+		rodManager.spawnRod();
+	});
+	panel.addControl(spawnRodBtn);
+
+	// Spacer
+	const spacerRodSpawn = new TextBlock();
+	spacerRodSpawn.height = "10px";
+	panel.addControl(spacerRodSpawn);
 
 	// Random Kick Button
 	const kickButton = Button.CreateSimpleButton("but2", "Kick Selected");
