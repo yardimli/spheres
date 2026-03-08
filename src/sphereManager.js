@@ -15,15 +15,17 @@ import {
 } from "@babylonjs/core";
 
 export class SphereManager {
-	constructor (scene, shadowGenerator) {
+	constructor(scene, shadowGenerator) {
 		this.scene = scene;
 		this.shadowGenerator = shadowGenerator;
 		this.spheres = [];
 		this.selectedSphere = null;
 		this.onSelectionChange = null;
+		// Track when the last drag ended to prevent accidental clicks/selections immediately after dragging
+		this.lastDragTime = 0;
 	}
 
-	createSphere (radius = 2, subdivisions = 1) {
+	createSphere(radius = 2, subdivisions = 1) {
 		// Create Outer Mesh (Icosphere)
 		const sphere = MeshBuilder.CreateIcoSphere("sphere", {
 			radius: radius,
@@ -99,7 +101,7 @@ export class SphereManager {
 		this.selectSphere(sphere);
 	}
 
-	_addPhysics (mesh) {
+	_addPhysics(mesh) {
 		if (mesh.physicsBody) {
 			mesh.physicsBody.dispose();
 		}
@@ -121,7 +123,7 @@ export class SphereManager {
 		agg.body.setAngularDamping(1.0);
 	}
 
-	_addDragBehavior (mesh) {
+	_addDragBehavior(mesh) {
 		// mesh is the core (child), but we want to move the sphere (parent)
 		const rootMesh = mesh.parent || mesh;
 
@@ -134,11 +136,14 @@ export class SphereManager {
 		dragBehavior.useObjectOrientationForDragging = false;
 
 		let isDragging = false;
+		// Flag to ensure we don't apply velocity if the user just clicked (without moving mouse)
+		let hasMoved = false;
 		const targetPosition = new Vector3();
 
 		// Logic to apply velocity towards target
 		const renderObserver = this.scene.onBeforeRenderObservable.add(() => {
-			if (!isDragging || !rootMesh.physicsBody) return;
+			// Only apply physics movement if we are actively dragging AND the mouse has actually moved
+			if (!isDragging || !hasMoved || !rootMesh.physicsBody) return;
 
 			const currentPos = rootMesh.absolutePosition;
 			const direction = targetPosition.subtract(currentPos);
@@ -170,6 +175,7 @@ export class SphereManager {
 
 			if (rootMesh.physicsBody) {
 				isDragging = true;
+				hasMoved = false; // Reset movement flag
 				rootMesh.physicsBody.setMotionType(PhysicsMotionType.DYNAMIC);
 
 				// Update drag plane to be perpendicular to camera view for intuitive 3D dragging
@@ -186,6 +192,8 @@ export class SphereManager {
 
 		dragBehavior.onDragObservable.add((event) => {
 			if (isDragging) {
+				// Mark that we have actually moved the mouse
+				hasMoved = true;
 				// Update target to follow cursor in 3D
 				targetPosition.copyFrom(event.dragPlanePoint);
 			}
@@ -194,8 +202,12 @@ export class SphereManager {
 		dragBehavior.onDragEndObservable.add(() => {
 			if (rootMesh.physicsBody) {
 				isDragging = false;
+				hasMoved = false;
 				const currentVel = rootMesh.physicsBody.getLinearVelocity();
 				rootMesh.physicsBody.setLinearVelocity(currentVel.scale(0.5));
+
+				// Record timestamp to prevent conflict with click selection
+				this.lastDragTime = Date.now();
 			}
 		});
 
@@ -206,7 +218,7 @@ export class SphereManager {
 		mesh.addBehavior(dragBehavior);
 	}
 
-	applyRandomVelocity () {
+	applyRandomVelocity() {
 		if (!this.selectedSphere || !this.selectedSphere.physicsBody) return;
 
 		this.selectedSphere.physicsBody.setMotionType(PhysicsMotionType.DYNAMIC);
@@ -223,7 +235,7 @@ export class SphereManager {
 		this.selectedSphere.physicsBody.applyImpulse(impulse, this.selectedSphere.getAbsolutePosition());
 	}
 
-	mutateSelectedSphere () {
+	mutateSelectedSphere() {
 		if (!this.selectedSphere) return;
 
 		const mesh = this.selectedSphere;
@@ -267,7 +279,7 @@ export class SphereManager {
 		this._addPhysics(mesh);
 	}
 
-	_applyStoredMutations (mesh) {
+	_applyStoredMutations(mesh) {
 		if (!mesh.metadata.mutations || mesh.metadata.mutations.length === 0) return;
 
 		const positions = mesh.getVerticesData(VertexBuffer.PositionKind);
@@ -318,7 +330,7 @@ export class SphereManager {
 		mesh.createNormals(true);
 	}
 
-	selectSphere (sphere) {
+	selectSphere(sphere) {
 		if (this.selectedSphere === sphere) return;
 
 		if (this.selectedSphere && !this.selectedSphere.isDisposed()) {
@@ -337,7 +349,7 @@ export class SphereManager {
 		}
 	}
 
-	updateSelectedSphere (radius, subdivisions) {
+	updateSelectedSphere(radius, subdivisions) {
 		if (!this.selectedSphere) return;
 
 		const sphere = this.selectedSphere;

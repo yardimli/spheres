@@ -13,7 +13,8 @@ import {
 	ExecuteCodeAction,
 	Scalar,
 	Mesh,
-	VertexData
+	VertexData,
+	PointerEventTypes
 } from "@babylonjs/core";
 
 export class RodManager {
@@ -47,9 +48,18 @@ export class RodManager {
 	}
 
 	_initInteraction() {
-		// Click Logic
-		this.scene.onPointerDown = (evt, pickInfo) => {
-			if (evt.button !== 0) return; // Left click only
+		// Use PointerObservable to handle interaction logic more granularly
+		// We use POINTERUP to distinguish between a drag release and a click
+		this.scene.onPointerObservable.add((pointerInfo) => {
+			if (pointerInfo.event.button !== 0) return; // Left click only
+
+			// Check if a drag operation just finished recently (within 200ms)
+			// If so, this "Up" event is part of the drag, not a click to select.
+			if (this.sphereManager.lastDragTime && (Date.now() - this.sphereManager.lastDragTime < 200)) {
+				return;
+			}
+
+			const pickInfo = pointerInfo.pickInfo;
 
 			// Check if we clicked a Rod
 			if (pickInfo.hit && pickInfo.pickedMesh && pickInfo.pickedMesh.name === "connectionRod") {
@@ -68,7 +78,8 @@ export class RodManager {
 			// Clicked elsewhere
 			this._deselectRod();
 			this._clearFaceSelection();
-		};
+
+		}, PointerEventTypes.POINTERUP);
 	}
 
 	_getFaceData(mesh, faceId) {
@@ -94,7 +105,7 @@ export class RodManager {
 		const v3w = Vector3.TransformCoordinates(v3, worldMatrix);
 
 		// Calculate Center
-		const center = v1w.add(v2w).add(v3w).scale(1/3);
+		const center = v1w.add(v2w).add(v3w).scale(1 / 3);
 
 		// Calculate Normal
 		const edge1 = v2w.subtract(v1w);
@@ -183,7 +194,7 @@ export class RodManager {
 		// Ensure visual normal matches logical normal (outward)
 		// We use the same logic as _getFaceData but in local space
 		// Local center is (0,0,0) for the core
-		const localCenter = v1.add(v2).add(v3).scale(1/3);
+		const localCenter = v1.add(v2).add(v3).scale(1 / 3);
 		if (Vector3.Dot(normal, localCenter) < 0) {
 			// Flip winding order for visual mesh if needed, or just flip normal
 			// For rendering, we want the face to face out.
@@ -264,7 +275,7 @@ export class RodManager {
 			bodyB.setMotionType(PhysicsMotionType.ANIMATED); // Kinematic for animation
 		}
 
-		// 2. Calculate Target Position and Rotation for Sphere B
+		// 2. Prepare Geometry Data
 		const posA = sphereA.absolutePosition;
 		const normalA = faceA.normal; // Normalized direction out of A
 
@@ -278,7 +289,7 @@ export class RodManager {
 		// Position B along the normal extending from A
 		const targetPosB = posA.add(normalA.scale(totalDistance));
 
-		// Target Rotation
+		// Target Rotation for B
 		const worldMatrixB = sphereB.computeWorldMatrix(true);
 		const rotationMatrixB = new Matrix();
 		worldMatrixB.getRotationMatrixToRef(rotationMatrixB);
@@ -293,7 +304,17 @@ export class RodManager {
 		// Apply this rotation to the current rotation of Sphere B
 		const targetRotB = alignmentQuat.multiply(rotationB);
 
-		// 3. Animate Sphere B
+		// --- SEQUENCE START ---
+
+		// 3. Create Rod Mesh immediately at Sphere A
+		// Returns { mesh, animationPromise }
+		const rodData = this._createRodMesh(faceA.center, this.rodLength, normalA, sphereA);
+		const rod = rodData.mesh;
+
+		// 4. Wait for Rod to grow fully
+		await rodData.animationPromise;
+
+		// 5. Animate Sphere B to the end of the rod
 		const frameRate = 60;
 		const duration = 60; // 1 second
 
@@ -316,53 +337,45 @@ export class RodManager {
 
 		sphereB.animations = [animPos, animRot];
 
-		return new Promise((resolve) => {
-			this.scene.beginAnimation(sphereB, 0, duration, false, 1.0, () => {
-				// Animation Complete
-
-				// 4. Create Rod Mesh
-				// Pass sphereA explicitly as parent, because this.selectedFace is cleared
-				const rod = this._createRodMesh(faceA.center, this.rodLength, normalA, sphereA);
-
-				// 5. Physics Constraint (Lock)
-				if (sphereA.physicsBody && sphereB.physicsBody) {
-					// Reset B to Dynamic
-					bodyB.setMotionType(PhysicsMotionType.DYNAMIC);
-
-					// Create Lock Constraint
-					const constraint = new Physics6DoFConstraint(
-						{
-							pivotA: Vector3.Zero(),
-							pivotB: Vector3.Zero(),
-						},
-						[
-							{ axis: PhysicsConstraintAxis.LINEAR_X, minLimit: 0, maxLimit: 0 },
-							{ axis: PhysicsConstraintAxis.LINEAR_Y, minLimit: 0, maxLimit: 0 },
-							{ axis: PhysicsConstraintAxis.LINEAR_Z, minLimit: 0, maxLimit: 0 },
-							{ axis: PhysicsConstraintAxis.ANGULAR_X, minLimit: 0, maxLimit: 0 },
-							{ axis: PhysicsConstraintAxis.ANGULAR_Y, minLimit: 0, maxLimit: 0 },
-							{ axis: PhysicsConstraintAxis.ANGULAR_Z, minLimit: 0, maxLimit: 0 },
-						],
-						this.scene
-					);
-
-					sphereA.physicsBody.addConstraint(sphereB.physicsBody, constraint);
-
-					// Store connection data
-					const connection = {
-						mesh: rod,
-						constraint: constraint,
-						sphereA: sphereA,
-						sphereB: sphereB
-					};
-
-					rod.metadata = { connection: connection };
-					this.rods.push(connection);
-				}
-
-				resolve();
-			});
+		await new Promise((resolve) => {
+			this.scene.beginAnimation(sphereB, 0, duration, false, 1.0, resolve);
 		});
+
+		// 6. Physics Constraint (Lock)
+		if (sphereA.physicsBody && sphereB.physicsBody) {
+			// Reset B to Dynamic
+			bodyB.setMotionType(PhysicsMotionType.DYNAMIC);
+
+			// Create Lock Constraint
+			const constraint = new Physics6DoFConstraint(
+				{
+					pivotA: Vector3.Zero(),
+					pivotB: Vector3.Zero(),
+				},
+				[
+					{ axis: PhysicsConstraintAxis.LINEAR_X, minLimit: 0, maxLimit: 0 },
+					{ axis: PhysicsConstraintAxis.LINEAR_Y, minLimit: 0, maxLimit: 0 },
+					{ axis: PhysicsConstraintAxis.LINEAR_Z, minLimit: 0, maxLimit: 0 },
+					{ axis: PhysicsConstraintAxis.ANGULAR_X, minLimit: 0, maxLimit: 0 },
+					{ axis: PhysicsConstraintAxis.ANGULAR_Y, minLimit: 0, maxLimit: 0 },
+					{ axis: PhysicsConstraintAxis.ANGULAR_Z, minLimit: 0, maxLimit: 0 },
+				],
+				this.scene
+			);
+
+			sphereA.physicsBody.addConstraint(sphereB.physicsBody, constraint);
+
+			// Store connection data
+			const connection = {
+				mesh: rod,
+				constraint: constraint,
+				sphereA: sphereA,
+				sphereB: sphereB
+			};
+
+			rod.metadata = { connection: connection };
+			this.rods.push(connection);
+		}
 	}
 
 	_createRodMesh(startPoint, length, direction, parentMesh) {
@@ -406,14 +419,18 @@ export class RodManager {
 		];
 		animScale.setKeys(keys);
 		rod.animations = [animScale];
-		this.scene.beginAnimation(rod, 0, 30, false);
 
 		// Parent the rod to the sphere
 		if (parentMesh) {
 			rod.setParent(parentMesh);
 		}
 
-		return rod;
+		// Return mesh and a promise that resolves when animation completes
+		const animationPromise = new Promise((resolve) => {
+			this.scene.beginAnimation(rod, 0, 30, false, 1.0, resolve);
+		});
+
+		return { mesh: rod, animationPromise: animationPromise };
 	}
 
 	_selectRod(mesh) {
