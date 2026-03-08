@@ -99,7 +99,17 @@ export class RodManager {
 		// Calculate Normal
 		const edge1 = v2w.subtract(v1w);
 		const edge2 = v3w.subtract(v1w);
-		const normal = Vector3.Cross(edge1, edge2).normalize();
+		let normal = Vector3.Cross(edge1, edge2).normalize();
+
+		// FIX: Ensure normal points outward from the sphere center
+		// The core mesh's parent is the sphere, so the sphere center is the parent's position
+		// Or simply, the core's absolute position is the center (since it's centered in the sphere)
+		const meshCenter = mesh.absolutePosition;
+		const dirFromCenter = center.subtract(meshCenter);
+
+		if (Vector3.Dot(normal, dirFromCenter) < 0) {
+			normal.scaleInPlace(-1);
+		}
 
 		return {
 			mesh: mesh,
@@ -134,6 +144,13 @@ export class RodManager {
 
 		// Case 3: Second selection (different mesh)
 		if (this.selectedFace.mesh !== faceData.mesh) {
+			// Prevent connecting a sphere to itself
+			if (this.selectedFace.mesh.parent === faceData.mesh.parent) {
+				console.warn("Cannot connect a sphere to itself.");
+				this._clearFaceSelection();
+				return;
+			}
+
 			// Connect!
 			this._connectSpheres(this.selectedFace, faceData);
 			this._clearFaceSelection();
@@ -162,6 +179,18 @@ export class RodManager {
 
 		// Calculate normal for this single face
 		const normal = Vector3.Cross(v2.subtract(v1), v3.subtract(v1)).normalize();
+
+		// Ensure visual normal matches logical normal (outward)
+		// We use the same logic as _getFaceData but in local space
+		// Local center is (0,0,0) for the core
+		const localCenter = v1.add(v2).add(v3).scale(1/3);
+		if (Vector3.Dot(normal, localCenter) < 0) {
+			// Flip winding order for visual mesh if needed, or just flip normal
+			// For rendering, we want the face to face out.
+			vertexData.indices = [0, 2, 1]; // Flip indices
+			normal.scaleInPlace(-1);
+		}
+
 		vertexData.normals = [...normal.asArray(), ...normal.asArray(), ...normal.asArray()];
 
 		vertexData.applyToMesh(customMesh);
@@ -246,6 +275,7 @@ export class RodManager {
 		// Total distance between sphere centers
 		const totalDistance = distA + this.rodLength + distB;
 
+		// Position B along the normal extending from A
 		const targetPosB = posA.add(normalA.scale(totalDistance));
 
 		// Target Rotation
@@ -255,7 +285,7 @@ export class RodManager {
 		const rotationB = Quaternion.FromRotationMatrix(rotationMatrixB);
 
 		const normalB = faceB.normal;
-		const targetNormalB = normalA.scale(-1);
+		const targetNormalB = normalA.scale(-1); // Point back towards A
 
 		// Quaternion to rotate NormalB to TargetNormalB
 		const alignmentQuat = this._getRotationFromTo(normalB, targetNormalB);
