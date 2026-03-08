@@ -120,7 +120,7 @@ export function createUI(sphereManager, environmentManager) {
 	spacer3.height = "10px";
 	panel.addControl(spacer3);
 
-	// Mutation Button (New)
+	// Mutation Button
 	const mutateButton = Button.CreateSimpleButton("but3", "Mutation");
 	mutateButton.width = "200px";
 	mutateButton.height = "40px";

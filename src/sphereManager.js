@@ -11,7 +11,7 @@ import {
 	ActionManager,
 	ExecuteCodeAction,
 	Quaternion,
-	VertexBuffer // Added import
+	VertexBuffer
 } from "@babylonjs/core";
 
 export class SphereManager {
@@ -231,7 +231,7 @@ export class SphereManager {
 	}
 
 	/**
-	 * Deforms the selected sphere by moving a random vertex outward.
+	 * Deforms the selected sphere by moving a random vertex outward or inward.
 	 */
 	mutateSelectedSphere () {
 		if (!this.selectedSphere) return;
@@ -250,7 +250,12 @@ export class SphereManager {
 		const direction = currentPos.normalizeToNew(); // Assuming center is 0,0,0
 
 		// 3. Create a deformation vector
-		const deformationAmount = Scalar.RandomRange(0.5, 1.5);
+		// Randomly choose Outward (positive) or Inward (negative)
+		const isOutward = Math.random() > 0.5;
+		// Random magnitude between 0.3 and 1.5 units
+		const magnitude = Scalar.RandomRange(0.3, 1.5);
+		const deformationAmount = isOutward ? magnitude : -magnitude;
+
 		const offset = direction.scale(deformationAmount);
 
 		// 4. Store mutation for persistence across recreations.
