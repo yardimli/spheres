@@ -14,7 +14,9 @@ import {
 	Scalar,
 	Mesh,
 	VertexData,
-	PointerEventTypes
+	PointerEventTypes,
+	PhysicsAggregate, // Added
+	PhysicsShapeType  // Added
 } from "@babylonjs/core";
 
 export class RodManager {
@@ -31,7 +33,7 @@ export class RodManager {
 		this.selectedFace = null; // { mesh, faceId, normal, center }
 		this.selectionMesh = null; // Selected face mesh (pulsing)
 		this.selectedRod = null;
-		this.rods = []; // Store active rods
+		this.rods =[]; // Store active rods
 
 		// Materials
 		this.rodMat = new StandardMaterial("rodMat", scene);
@@ -125,7 +127,7 @@ export class RodManager {
 		return {
 			mesh: mesh,
 			faceId: faceId,
-			vertices: [v1w, v2w, v3w],
+			vertices:[v1w, v2w, v3w],
 			center: center,
 			normal: normal
 		};
@@ -202,7 +204,7 @@ export class RodManager {
 			normal.scaleInPlace(-1);
 		}
 
-		vertexData.normals = [...normal.asArray(), ...normal.asArray(), ...normal.asArray()];
+		vertexData.normals =[...normal.asArray(), ...normal.asArray(), ...normal.asArray()];
 
 		vertexData.applyToMesh(customMesh);
 
@@ -222,7 +224,7 @@ export class RodManager {
 
 		// Animation (Pulse Alpha)
 		const anim = new Animation("pulse", "material.alpha", 60, Animation.ANIMATIONTYPE_FLOAT, Animation.ANIMATIONLOOPMODE_CYCLE);
-		const keys = [
+		const keys =[
 			{ frame: 0, value: 0.3 },
 			{ frame: 30, value: 0.8 },
 			{ frame: 60, value: 0.3 }
@@ -263,17 +265,62 @@ export class RodManager {
 		return Quaternion.RotationAxis(axis.normalize(), Math.acos(dot));
 	}
 
+	// Helper function to create a 6DoF fixed constraint aligning current orientations
+	_createFixedConstraint(meshA, meshB, anchorWorldPos) {
+		// Create inverse matrices to map our world anchor point to local space pivots
+		const invMatrixA = meshA.computeWorldMatrix(true).clone().invert();
+		const invMatrixB = meshB.computeWorldMatrix(true).clone().invert();
+
+		const pivotA = Vector3.TransformCoordinates(anchorWorldPos, invMatrixA);
+		const pivotB = Vector3.TransformCoordinates(anchorWorldPos, invMatrixB);
+
+		// Map world orientation axes into the local space of each mesh
+		const rotMatrixA = new Matrix();
+		meshA.getWorldMatrix().getRotationMatrixToRef(rotMatrixA);
+		rotMatrixA.invert();
+
+		const rotMatrixB = new Matrix();
+		meshB.getWorldMatrix().getRotationMatrixToRef(rotMatrixB);
+		rotMatrixB.invert();
+
+		const axisA = Vector3.TransformNormal(Vector3.Up(), rotMatrixA).normalize();
+		const axisB = Vector3.TransformNormal(Vector3.Up(), rotMatrixB).normalize();
+
+		const perpAxisA = Vector3.TransformNormal(Vector3.Right(), rotMatrixA).normalize();
+		const perpAxisB = Vector3.TransformNormal(Vector3.Right(), rotMatrixB).normalize();
+
+		// A completely locked constraint to enforce absolute rigid connection
+		return new Physics6DoFConstraint(
+			{
+				pivotA: pivotA,
+				pivotB: pivotB,
+				axisA: axisA,
+				axisB: axisB,
+				perpAxisA: perpAxisA,
+				perpAxisB: perpAxisB
+			},[
+				{ axis: PhysicsConstraintAxis.LINEAR_X, minLimit: 0, maxLimit: 0 },
+				{ axis: PhysicsConstraintAxis.LINEAR_Y, minLimit: 0, maxLimit: 0 },
+				{ axis: PhysicsConstraintAxis.LINEAR_Z, minLimit: 0, maxLimit: 0 },
+				{ axis: PhysicsConstraintAxis.ANGULAR_X, minLimit: 0, maxLimit: 0 },
+				{ axis: PhysicsConstraintAxis.ANGULAR_Y, minLimit: 0, maxLimit: 0 },
+				{ axis: PhysicsConstraintAxis.ANGULAR_Z, minLimit: 0, maxLimit: 0 },
+			],
+			this.scene
+		);
+	}
+
 	async _connectSpheres(faceA, faceB) {
 		const sphereA = faceA.mesh.parent;
 		const sphereB = faceB.mesh.parent;
 
 		if (!sphereA || !sphereB) return;
 
-		// 1. Disable Physics on Sphere B (the one that moves)
+		// 1. Disable Physics on Both Spheres (Lock in place during sequence)
+		const bodyA = sphereA.physicsBody;
 		const bodyB = sphereB.physicsBody;
-		if (bodyB) {
-			bodyB.setMotionType(PhysicsMotionType.ANIMATED); // Kinematic for animation
-		}
+		if (bodyA) bodyA.setMotionType(PhysicsMotionType.ANIMATED);
+		if (bodyB) bodyB.setMotionType(PhysicsMotionType.ANIMATED);
 
 		// 2. Prepare Geometry Data
 		const posA = sphereA.absolutePosition;
@@ -307,7 +354,6 @@ export class RodManager {
 		// --- SEQUENCE START ---
 
 		// 3. Create Rod Mesh immediately at Sphere A
-		// Returns { mesh, animationPromise }
 		const rodData = this._createRodMesh(faceA.center, this.rodLength, normalA, sphereA);
 		const rod = rodData.mesh;
 
@@ -319,7 +365,7 @@ export class RodManager {
 		const duration = 60; // 1 second
 
 		const animPos = new Animation("animPos", "position", frameRate, Animation.ANIMATIONTYPE_VECTOR3, Animation.ANIMATIONLOOPMODE_CONSTANT);
-		const keysPos = [
+		const keysPos =[
 			{ frame: 0, value: sphereB.position.clone() },
 			{ frame: duration, value: targetPosB }
 		];
@@ -329,53 +375,64 @@ export class RodManager {
 		// Ensure sphereB has a quaternion
 		if (!sphereB.rotationQuaternion) sphereB.rotationQuaternion = Quaternion.FromEulerVector(sphereB.rotation);
 
-		const keysRot = [
+		const keysRot =[
 			{ frame: 0, value: sphereB.rotationQuaternion.clone() },
 			{ frame: duration, value: targetRotB }
 		];
 		animRot.setKeys(keysRot);
 
-		sphereB.animations = [animPos, animRot];
+		sphereB.animations =[animPos, animRot];
 
 		await new Promise((resolve) => {
 			this.scene.beginAnimation(sphereB, 0, duration, false, 1.0, resolve);
 		});
 
-		// 6. Physics Constraint (Lock)
-		if (sphereA.physicsBody && sphereB.physicsBody) {
-			// Reset B to Dynamic
-			bodyB.setMotionType(PhysicsMotionType.DYNAMIC);
+		// 6. Physics Phase - The Rod Becomes a Physical Body
+		// Decouple the rod from the sphere to act as an independent physics body
+		rod.setParent(null);
 
-			// Create Lock Constraint
-			const constraint = new Physics6DoFConstraint(
-				{
-					pivotA: Vector3.Zero(),
-					pivotB: Vector3.Zero(),
-				},
-				[
-					{ axis: PhysicsConstraintAxis.LINEAR_X, minLimit: 0, maxLimit: 0 },
-					{ axis: PhysicsConstraintAxis.LINEAR_Y, minLimit: 0, maxLimit: 0 },
-					{ axis: PhysicsConstraintAxis.LINEAR_Z, minLimit: 0, maxLimit: 0 },
-					{ axis: PhysicsConstraintAxis.ANGULAR_X, minLimit: 0, maxLimit: 0 },
-					{ axis: PhysicsConstraintAxis.ANGULAR_Y, minLimit: 0, maxLimit: 0 },
-					{ axis: PhysicsConstraintAxis.ANGULAR_Z, minLimit: 0, maxLimit: 0 },
-				],
-				this.scene
-			);
+		// Force complete recalculation of world matrices post-animation
+		sphereA.computeWorldMatrix(true);
+		sphereB.computeWorldMatrix(true);
+		rod.computeWorldMatrix(true);
 
-			sphereA.physicsBody.addConstraint(sphereB.physicsBody, constraint);
+		// Make the rod a physical object (using Convex Hull wraps the hollow shell into a single solid unit)
+		const rodAgg = new PhysicsAggregate(
+			rod,
+			PhysicsShapeType.CONVEX_HULL,
+			{ mass: 0.5, friction: 0.5, restitution: 0.5 },
+			this.scene
+		);
+		rodAgg.body.setLinearDamping(1.0);
+		rodAgg.body.setAngularDamping(1.0);
 
-			// Store connection data
-			const connection = {
-				mesh: rod,
-				constraint: constraint,
-				sphereA: sphereA,
-				sphereB: sphereB
-			};
+		// Restore original motion types
+		if (bodyA) bodyA.setMotionType(PhysicsMotionType.DYNAMIC);
+		if (bodyB) bodyB.setMotionType(PhysicsMotionType.DYNAMIC);
 
-			rod.metadata = { connection: connection };
-			this.rods.push(connection);
-		}
+		// Set connection anchors - Start and End of rod
+		const rodBaseWorldPos = rod.absolutePosition;
+		const rodTopLocalPos = new Vector3(0, this.rodLength, 0); // Lathe mesh is built along local Y
+		const rodTopWorldPos = Vector3.TransformCoordinates(rodTopLocalPos, rod.getWorldMatrix());
+
+		// Chain the constraints: Sphere A <-Constraint-> Rod <-Constraint-> Sphere B
+		const constraintA = this._createFixedConstraint(sphereA, rod, rodBaseWorldPos);
+		const constraintB = this._createFixedConstraint(rod, sphereB, rodTopWorldPos);
+
+		sphereA.physicsBody.addConstraint(rod.physicsBody, constraintA);
+		rod.physicsBody.addConstraint(sphereB.physicsBody, constraintB);
+
+		// Store connection data bridging all three meshes
+		const connection = {
+			mesh: rod,
+			constraintA: constraintA,
+			constraintB: constraintB,
+			sphereA: sphereA,
+			sphereB: sphereB
+		};
+
+		rod.metadata = { connection: connection };
+		this.rods.push(connection);
 	}
 
 	_createRodMesh(startPoint, length, direction, parentMesh) {
@@ -383,7 +440,7 @@ export class RodManager {
 		const outerRadius = this.rodDiameter / 2;
 		const innerRadius = outerRadius - this.rodWallThickness;
 
-		const shape = [
+		const shape =[
 			new Vector3(innerRadius, 0, 0),
 			new Vector3(outerRadius, 0, 0),
 			new Vector3(outerRadius, length, 0),
@@ -413,14 +470,14 @@ export class RodManager {
 		rod.scaling.y = 0.01;
 
 		const animScale = new Animation("growRod", "scaling.y", 60, Animation.ANIMATIONTYPE_FLOAT, Animation.ANIMATIONLOOPMODE_CONSTANT);
-		const keys = [
+		const keys =[
 			{ frame: 0, value: 0.01 },
 			{ frame: 30, value: 1.0 }
 		];
 		animScale.setKeys(keys);
 		rod.animations = [animScale];
 
-		// Parent the rod to the sphere
+		// Parent the rod to the sphere temporarily for the growth animation
 		if (parentMesh) {
 			rod.setParent(parentMesh);
 		}
@@ -455,12 +512,19 @@ export class RodManager {
 
 		const connection = this.selectedRod.metadata.connection;
 
-		// Remove Constraint
-		if (connection.constraint) {
-			connection.constraint.dispose();
+		// Dispose Constraints cleanly
+		if (connection.constraintA) connection.constraintA.dispose();
+		if (connection.constraintB) connection.constraintB.dispose();
+
+		// Fallback clean-up in case constraint object was initialized with older version
+		if (connection.constraint) connection.constraint.dispose();
+
+		// Dispose Physics Body cleanly
+		if (connection.mesh && connection.mesh.physicsBody) {
+			connection.mesh.physicsBody.dispose();
 		}
 
-		// Remove Mesh
+		// Remove Visual Mesh
 		if (connection.mesh) {
 			connection.mesh.dispose();
 		}
