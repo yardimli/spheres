@@ -2,6 +2,7 @@ import {
 	MeshBuilder,
 	StandardMaterial,
 	Color3,
+	Color4,
 	PhysicsAggregate,
 	PhysicsShapeType,
 	SpotLight,
@@ -15,17 +16,18 @@ export class EnvironmentManager {
 		this.scene = scene;
 		this.shadowGenerator = null;
 
-		// Ground and Walls
-		this.ground = null;
-		this.groundAggregate = null;
+		// Walls (Now 6 sides: Top, Bottom, Left, Right, Front, Back)
 		this.walls = [];
 		this.wallAggregates = [];
 
+		// Visual Boundary
+		this.roomBorder = null;
+
 		// Settings
-		this.wallHeight = 50;
 		this.wallThickness = 2;
-		this.currentWidth = 100;
-		this.currentDepth = 100;
+		this.currentWidth = 50;
+		this.currentDepth = 50;
+		this.currentHeight = 50;
 	}
 
 	build () {
@@ -33,25 +35,34 @@ export class EnvironmentManager {
 		const ambientLight = new HemisphericLight("ambient", new Vector3(0, 1, 0), this.scene);
 		ambientLight.intensity = 0.4;
 
-		// Spotlight to cast shadows
-		const spotLight = new SpotLight("spotLight", new Vector3(0, 30, 0), new Vector3(0, -1, 0), Math.PI / 2, 2, this.scene);
+		// Spotlight to cast shadows (Positioned outside the box)
+		const spotLight = new SpotLight("spotLight", new Vector3(0, 60, 0), new Vector3(0, -1, 0), Math.PI / 2, 5, this.scene);
 		spotLight.intensity = 0.8;
 
-		// Ground Mesh
-		// We start with 1x1 and scale it in updateGroundDimensions
-		this.ground = MeshBuilder.CreateGround("ground", { width: 1, height: 1 }, this.scene);
-		const groundMat = new StandardMaterial("groundMat", this.scene);
-		groundMat.diffuseColor = new Color3(0.5, 0.5, 0.5);
-		this.ground.material = groundMat;
-		this.ground.receiveShadows = true;
-
-		// Create 4 Walls (Invisible)
-		for (let i = 0; i < 4; i++) {
+		// Create 6 Walls (Invisible)
+		// 0: Top, 1: Bottom, 2: Right, 3: Left, 4: Front, 5: Back
+		for (let i = 0; i < 6; i++) {
 			const wall = MeshBuilder.CreateBox("wall_" + i, { size: 1 }, this.scene);
 			wall.isVisible = false; // Make invisible
 			this.walls.push(wall);
 			this.wallAggregates.push(null);
 		}
+
+		// Create Visual Room Edges
+		// We create a box that matches the inner dimensions of the room
+		this.roomBorder = MeshBuilder.CreateBox("roomBorder", { size: 1 }, this.scene);
+		const borderMat = new StandardMaterial("borderMat", this.scene);
+		borderMat.alpha = 0; // Invisible faces
+		this.roomBorder.material = borderMat;
+
+		// Enable Edges Rendering to show the wireframe box
+		this.roomBorder.enableEdgesRendering();
+		this.roomBorder.edgesWidth = 4.0;
+		this.roomBorder.edgesColor = new Color4(1, 1, 1, 1); // White edges
+
+		// Ensure it doesn't interfere with physics or picking
+		this.roomBorder.isPickable = false;
+		this.roomBorder.checkCollisions = false;
 
 		// Shadows
 		this.shadowGenerator = new ShadowGenerator(1024, spotLight);
@@ -59,62 +70,58 @@ export class EnvironmentManager {
 		this.shadowGenerator.blurKernel = 32;
 
 		// Initial sizing
-		this.updateGroundDimensions(100, 100);
+		this.updateRoomDimensions(50, 50, 50);
 
 		return this.shadowGenerator;
 	}
 
-	updateGroundDimensions (width, depth) {
+	updateRoomDimensions (width, depth, height = 50) {
 		this.currentWidth = width;
 		this.currentDepth = depth;
+		this.currentHeight = height;
 
-		// 1. Update Ground Scaling
-		this.ground.scaling.x = width;
-		this.ground.scaling.z = depth;
-
-		// Update Ground Physics
-		// We must recreate the aggregate to match the new scaling/shape
-		if (this.groundAggregate) {
-			this.groundAggregate.dispose();
+		// Update Visual Border Size
+		if (this.roomBorder) {
+			this.roomBorder.scaling.x = width;
+			this.roomBorder.scaling.y = height;
+			this.roomBorder.scaling.z = depth;
 		}
-		this.groundAggregate = new PhysicsAggregate(
-			this.ground,
-			PhysicsShapeType.BOX,
-			{ mass: 0, friction: 0.8, restitution: 0.6 },
-			this.scene
-		);
 
-		// 2. Update Walls
-		// Wall 0: +Z (Top)
-		// Wall 1: -Z (Bottom)
-		// Wall 2: +X (Right)
-		// Wall 3: -X (Left)
 		const halfW = width / 2;
 		const halfD = depth / 2;
+		const halfH = height / 2;
 		const offset = this.wallThickness / 2;
 
 		// Configuration: Position and Scaling for each wall
 		const wallConfigs = [
-			{ // Top
-				pos: new Vector3(0, this.wallHeight / 2, halfD + offset),
-				scale: new Vector3(width + 2 * this.wallThickness, this.wallHeight, this.wallThickness)
+			{ // Top (+Y)
+				pos: new Vector3(0, halfH + offset, 0),
+				scale: new Vector3(width + 2 * this.wallThickness, this.wallThickness, depth + 2 * this.wallThickness)
 			},
-			{ // Bottom
-				pos: new Vector3(0, this.wallHeight / 2, -halfD - offset),
-				scale: new Vector3(width + 2 * this.wallThickness, this.wallHeight, this.wallThickness)
+			{ // Bottom (-Y)
+				pos: new Vector3(0, -halfH - offset, 0),
+				scale: new Vector3(width + 2 * this.wallThickness, this.wallThickness, depth + 2 * this.wallThickness)
 			},
-			{ // Right
-				pos: new Vector3(halfW + offset, this.wallHeight / 2, 0),
-				scale: new Vector3(this.wallThickness, this.wallHeight, depth)
+			{ // Right (+X)
+				pos: new Vector3(halfW + offset, 0, 0),
+				scale: new Vector3(this.wallThickness, height, depth)
 			},
-			{ // Left
-				pos: new Vector3(-halfW - offset, this.wallHeight / 2, 0),
-				scale: new Vector3(this.wallThickness, this.wallHeight, depth)
+			{ // Left (-X)
+				pos: new Vector3(-halfW - offset, 0, 0),
+				scale: new Vector3(this.wallThickness, height, depth)
+			},
+			{ // Front (+Z)
+				pos: new Vector3(0, 0, halfD + offset),
+				scale: new Vector3(width, height, this.wallThickness)
+			},
+			{ // Back (-Z)
+				pos: new Vector3(0, 0, -halfD - offset),
+				scale: new Vector3(width, height, this.wallThickness)
 			}
 		];
 
 		// Apply Configs
-		for (let i = 0; i < 4; i++) {
+		for (let i = 0; i < 6; i++) {
 			const wall = this.walls[i];
 			wall.position.copyFrom(wallConfigs[i].pos);
 			wall.scaling.copyFrom(wallConfigs[i].scale);

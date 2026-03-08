@@ -31,7 +31,7 @@ export function createUI(sphereManager, environmentManager) {
 			// Snap to integer if subdivisions
 			if(text === "Subdivisions") value = Math.round(value);
 			// Round size for clean display
-			if(text.includes("Ground") || text === "Size") value = Math.round(value * 10) / 10;
+			if(text.includes("Room") || text === "Size") value = Math.round(value * 10) / 10;
 
 			header.text = text + ": " + value;
 			onChange(value);
@@ -69,14 +69,19 @@ export function createUI(sphereManager, environmentManager) {
 
 	// --- Environment Controls ---
 
-	// Ground Width Slider
-	addSlider("Ground Width", 20, 200, environmentManager.currentWidth, (value) => {
-		environmentManager.updateGroundDimensions(value, environmentManager.currentDepth);
+	// Room Width Slider
+	addSlider("Room Width", 20, 200, environmentManager.currentWidth, (value) => {
+		environmentManager.updateRoomDimensions(value, environmentManager.currentDepth, environmentManager.currentHeight);
 	});
 
-	// Ground Depth Slider
-	addSlider("Ground Depth", 20, 200, environmentManager.currentDepth, (value) => {
-		environmentManager.updateGroundDimensions(environmentManager.currentWidth, value);
+	// Room Depth Slider
+	addSlider("Room Depth", 20, 200, environmentManager.currentDepth, (value) => {
+		environmentManager.updateRoomDimensions(environmentManager.currentWidth, value, environmentManager.currentHeight);
+	});
+
+	// Room Height Slider
+	addSlider("Room Height", 20, 200, environmentManager.currentHeight || 50, (value) => {
+		environmentManager.updateRoomDimensions(environmentManager.currentWidth, environmentManager.currentDepth, value);
 	});
 
 	// Spacer

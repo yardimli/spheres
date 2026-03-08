@@ -14,10 +14,11 @@ async function initApp() {
 	// Initialize Havok Physics
 	const havokInstance = await HavokPhysics();
 	const hk = new HavokPlugin(true, havokInstance);
-	scene.enablePhysics(new Vector3(0, -9.81, 0), hk);
+	// Gravity set to 0 for zero-G environment
+	scene.enablePhysics(new Vector3(0, 0, 0), hk);
 
 	// Camera
-	const camera = new ArcRotateCamera("Camera", -Math.PI / 2, Math.PI / 3, 25, Vector3.Zero(), scene);
+	const camera = new ArcRotateCamera("Camera", -Math.PI / 2, Math.PI / 3, 40, Vector3.Zero(), scene);
 	camera.attachControl(canvas, true);
 
 	// Build Environment
@@ -27,7 +28,7 @@ async function initApp() {
 	// Managers
 	const sphereManager = new SphereManager(scene, shadowGenerator);
 
-	// Pass environmentManager to UI so we can control ground size
+	// Pass environmentManager to UI so we can control room size
 	createUI(sphereManager, environmentManager);
 
 	// Initial Sphere
